@@ -50,7 +50,7 @@ Add a service without touching Java: [`docs/FINGERPRINT-GUIDE.md`](docs/FINGERPR
 
 **From release JAR (recommended):**
 
-1. Download `cloudintel-all.jar` from the [releases page](https://github.com/YOUR_USER/cloudintel/releases).
+1. Download `cloudintel-all.jar` from the [releases page](https://github.com/darshanjogi/cloudintel/releases/).
 2. Burp → **Extensions → Add → Extension type: Java** → select the JAR.
 3. A **CloudIntel** tab appears in the top bar.
 
