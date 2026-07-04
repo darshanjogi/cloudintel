@@ -1,0 +1,16 @@
+akamai.yaml
+alibaba-oss.yaml
+aws.yaml
+azure.yaml
+backblaze-b2.yaml
+bunnycdn.yaml
+cloudflare.yaml
+digitalocean.yaml
+fastly.yaml
+gcp.yaml
+github-pages.yaml
+heroku.yaml
+netlify.yaml
+oracle-cloud.yaml
+vercel.yaml
+wasabi.yaml

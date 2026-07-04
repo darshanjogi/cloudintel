@@ -1,0 +1,98 @@
+provider: GitHub Pages
+services:
+  - id: github-pages
+    name: 'GitHub Pages (github.io)'
+    category: platform
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)\.github\.io$'
+          asset_id: '$1'
+          label: 'GitHub Pages site: $1'
+        - from: url
+          regex: '(?i)https?://([a-z0-9][a-z0-9-]*)\.github\.io'
+          asset_id: '$1'
+          label: 'GitHub Pages site: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-github-io
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)github\.io$'
+        weight: 40
+      - id: server-github-com
+        source: header
+        match: regex
+        pattern: '(?i)server:\s*github\.com'
+        weight: 30
+      - id: x-github-request-id
+        source: header-name
+        match: iequals
+        pattern: 'x-github-request-id'
+        weight: 30
+      - id: site-not-found-body
+        source: body
+        match: contains
+        pattern: 'There isn''t a GitHub Pages site here.'
+        weight: 55
+      - id: site-not-found-title
+        source: body
+        match: regex
+        pattern: '(?i)Site not found.{0,15}GitHub Pages'
+        weight: 50
+      - id: fastly-served-by
+        source: header
+        match: regex
+        pattern: '(?i)x-served-by:\s*.*cache-'
+        weight: 15
+    deny:
+      hosts:
+        - 'github.com'
+        - '*.github.com'
+        - 'github.io'
+        - 'pages.github.com'
+        - 'raw.githubusercontent.com'
+    knowledge_base:
+      description: 'GitHub Pages is GitHub''s static-site hosting service. Content is built from a repository (a user/org site at <account>.github.io or a project site at <account>.github.io/<repo>) and served through a Fastly-backed edge, so responses carry a "Server: GitHub.com" header, an "x-github-request-id" header, and Fastly caching headers (x-served-by, x-cache, x-cache-hits). Custom domains are wired via a CNAME to <account>.github.io or A records to GitHub''s apex IPs (185.199.108.153-185.199.111.153). It matters as attack surface because: (1) dangling custom-domain CNAMEs pointing at an unclaimed <account>.github.io are a classic subdomain-takeover vector, signalled by the "There isn''t a GitHub Pages site here." page; (2) the site is built from a repository whose full source and commit history are often public, frequently leaking secrets, API keys, and internal endpoints; and (3) as a static host it is a common carrier of client-side (DOM-based) vulnerabilities and inadvertently published sensitive files.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Dangling CNAME subdomain takeover'
+          check: 'Resolve the custom domain''s CNAME/A records; if it points at {assetId}.github.io (or the GitHub Pages apex IPs) and the site returns the "There isn''t a GitHub Pages site here." page, the name may be claimable by creating a repo that publishes Pages with a matching CNAME file.'
+        - name: 'Source repository and secret exposure'
+          check: 'Locate the backing repository (e.g. github.com/{assetId}/{assetId}.github.io or the project repo) and review the full commit history and Actions build config for leaked credentials, tokens, and internal URLs.'
+        - name: 'Sensitive published file discovery'
+          wordlist: 'sensitive-files.txt'
+        - name: 'Exposed build / config artifacts'
+          check: 'GET https://{assetId}.github.io/CNAME, /.nojekyll, /sitemap.xml and any /config.yml or /_config.yml accidentally published to the site root.'
+        - name: 'Client-side / DOM-based vulnerabilities in the static site'
+          check: 'Review inline and bundled JavaScript served from {assetId}.github.io for reflected/DOM sinks (location, postMessage, innerHTML) and third-party script inclusion; there is no server-side control to sanitize input.'
+        - name: 'Content and path discovery'
+          wordlist: 'common-web-paths.txt'
+      verification_steps:
+        - 'Confirm the "Server: GitHub.com" response header.'
+        - 'Confirm the "x-github-request-id" response header (added by GitHub to Pages responses).'
+        - 'Confirm Fastly edge headers (x-served-by: cache-..., x-cache, x-cache-hits) that front GitHub Pages.'
+        - 'Resolve DNS: user/org and custom domains CNAME to <account>.github.io, or use A records 185.199.108.153-185.199.111.153.'
+        - 'Request a non-existent path and inspect the 404 page; the "There isn''t a GitHub Pages site here." / "Site not found - GitHub Pages" page indicates an unconfigured or unclaimed Pages site.'
+        - 'For any custom domain, verify the CNAME target resolves to a claimed Pages site to rule out subdomain takeover.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.github.io/'
+        headers: []
+      wordlists:
+        - 'common-web-paths.txt'
+        - 'sensitive-files.txt'
+        - 'github-pages-paths.txt'
+      references:
+        - 'https://docs.github.com/en/pages/getting-started-with-github-pages/about-github-pages'
+        - 'https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site'
+        - 'https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/verifying-your-custom-domain-for-github-pages'
+        - 'https://docs.github.com/en/pages/getting-started-with-github-pages/securing-your-github-pages-site-with-https'
+        - 'https://github.com/EdOverflow/can-i-take-over-xyz'

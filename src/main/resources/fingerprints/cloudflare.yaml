@@ -1,0 +1,132 @@
+provider: Cloudflare
+services:
+  - id: cloudflare-cdn
+    name: 'Cloudflare CDN/WAF'
+    category: cdn
+    severity: information
+    report_threshold: 65
+    bands:
+      medium: 65
+      high: 95
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9.-]+\.(?:workers|pages)\.dev)$'
+          asset_id: '$1'
+          label: 'Cloudflare developer-platform host $1'
+        - from: host
+          regex: '(?i)^([a-z0-9-]+\.r2\.cloudflarestorage\.com)$'
+          asset_id: '$1'
+          label: 'Cloudflare R2 storage endpoint $1'
+        - from: header:cf-ray
+          regex: '(?i)^[0-9a-f]{16}-([a-z]{3,4})$'
+          asset_id: '$1'
+          label: 'Cloudflare edge served from colo $1'
+      host_level_fallback: true
+    indicators:
+      - id: server-cloudflare
+        source: header
+        match: regex
+        pattern: '(?i)\bserver:\s*cloudflare\b'
+        weight: 40
+      - id: cf-ray-header
+        source: header
+        match: regex
+        pattern: '(?i)\bcf-ray:\s*[0-9a-f]{16}-[a-z]{3,4}\b'
+        weight: 40
+      - id: cf-cache-status
+        source: header
+        match: regex
+        pattern: '(?i)\bcf-cache-status:\s*(?:hit|miss|expired|stale|updating|revalidated|bypass|dynamic|none)\b'
+        weight: 25
+      - id: cf-mitigated-header
+        source: header
+        match: regex
+        pattern: '(?i)\bcf-mitigated:\s*\S+'
+        weight: 25
+      - id: nel-report-endpoint
+        source: header
+        match: regex
+        pattern: '(?i)\breport-to:\s*[^\r\n]*a\.nel\.cloudflare\.com'
+        weight: 20
+      - id: cf-bm-cookie
+        source: cookie
+        match: regex
+        pattern: '(?i)__cf_bm='
+        weight: 20
+      - id: cf-clearance-cookie
+        source: cookie
+        match: regex
+        pattern: '(?i)cf_clearance='
+        weight: 25
+      - id: cdn-cgi-path
+        source: body
+        match: contains
+        pattern: '/cdn-cgi/'
+        weight: 20
+      - id: cf-block-page
+        source: body
+        match: regex
+        pattern: '(?i)(?:attention required! \| cloudflare|cf-error-details|error\s+10\d{2}|cloudflare ray id)'
+        weight: 45
+      - id: host-workers-pages-dev
+        source: host
+        match: regex
+        pattern: '(?i)\.(?:workers|pages)\.dev$'
+        weight: 40
+      - id: host-r2-storage
+        source: host
+        match: regex
+        pattern: '(?i)\.r2\.cloudflarestorage\.com$'
+        weight: 40
+    deny:
+      hosts:
+        - 'localhost'
+        - '127.0.0.1'
+        - '*.local'
+        - '*.internal'
+        - '*.localhost'
+    knowledge_base:
+      description: 'Cloudflare is a globally distributed reverse-proxy CDN, WAF, and DDoS-mitigation layer that sits in front of customer origins on shared anycast edge IPs. As an intermediary it introduces attack surface distinct from the origin: origin-IP exposure that lets an attacker connect directly and bypass the WAF, rate limiting and bot management; web cache poisoning and web cache deception against the shared Cloudflare cache; information disclosure via the /cdn-cgi/trace endpoint (client IP, colo, WARP status) and Cloudflare email-obfuscation decoding; and challenge / bot-management bypass through cf_clearance token reuse. Cloudflare also fronts its own developer platform (Workers on workers.dev, Pages on pages.dev, and R2 object storage on r2.cloudflarestorage.com), each of which is its own reachable surface.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Origin IP disclosure and WAF bypass'
+          check: 'Enumerate historical DNS records, crt.sh / TLS certificate SANs, SPF/MX records and stale subdomains for {assetId} to locate the true origin IP, then request the site directly with Host: {assetId} to confirm the origin serves content while bypassing Cloudflare WAF, rate limiting and bot management.'
+        - name: 'cdn-cgi/trace information disclosure'
+          check: 'GET https://{assetId}/cdn-cgi/trace and read the fl=, h=, ip=, colo=, warp= and gateway= fields to confirm the edge, map the serving datacenter, and observe the client IP as seen by Cloudflare.'
+        - name: 'Cloudflare email-address harvesting'
+          check: 'Fetch pages of {assetId} and decode any /cdn-cgi/l/email-protection#<hex> tokens (the first byte is the XOR key) to recover email addresses that Cloudflare obfuscated in the HTML.'
+        - name: 'Web cache deception / cache poisoning'
+          check: 'Request an authenticated page of {assetId} with an appended cacheable path or extension (for example /account/foo.css) and re-request it unauthenticated; a cf-cache-status: HIT that returns private content indicates web cache deception against the Cloudflare cache.'
+        - name: 'Challenge and bot-management bypass'
+          check: 'Solve the interstitial challenge once, capture the cf_clearance cookie, and replay it from a different session or IP against {assetId} to test whether the clearance token is reusable and bound weakly.'
+        - name: 'WAF firewall-rule enumeration'
+          check: 'Send benign attack-like payloads (for example ?id=<script>) to {assetId} and observe cf-mitigated headers and 1xxx Cloudflare error / block pages (Error 1020, Ray ID) to map which managed and custom WAF rules trigger.'
+        - name: 'Cloudflare-fronted subdomain and origin enumeration'
+          wordlist: 'origin-discovery-subdomains.txt'
+      verification_steps:
+        - 'Send GET https://{assetId}/ and confirm the response carries Server: cloudflare and a cf-ray: <16-hex>-<COLO> header.'
+        - 'GET https://{assetId}/cdn-cgi/trace and confirm the plaintext fl=, h=, ip=, colo= key/value body is returned.'
+        - 'Inspect cf-cache-status across repeated requests to confirm caching is active before attempting cache poisoning or deception tests.'
+        - 'Look up the domain on crt.sh, SecurityTrails and passive-DNS sources to identify candidate origin IPs not covered by Cloudflare ranges.'
+        - 'Connect to a candidate origin IP directly with curl --resolve {assetId}:443:<origin-ip> and compare the response to the Cloudflare-fronted one to confirm a WAF bypass.'
+        - 'Trigger a benign WAF payload and confirm the cf-mitigated header or a Cloudflare block page (Attention Required! | Cloudflare, Ray ID) appears.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/cdn-cgi/trace'
+        headers:
+          - 'Host: {assetId}'
+          - 'User-Agent: Mozilla/5.0'
+      wordlists:
+        - 'cloudflare-cdn-cgi-paths.txt'
+        - 'cloudflare-error-codes.txt'
+        - 'origin-discovery-subdomains.txt'
+      references:
+        - 'https://developers.cloudflare.com/fundamentals/reference/http-headers/'
+        - 'https://developers.cloudflare.com/fundamentals/reference/cloudflare-cookies/'
+        - 'https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/'
+        - 'https://developers.cloudflare.com/waf/'
+        - 'https://portswigger.net/web-security/web-cache-deception'
+        - 'https://owasp.org/www-community/attacks/Cache_Poisoning'

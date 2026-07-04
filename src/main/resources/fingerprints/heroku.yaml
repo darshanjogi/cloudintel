@@ -1,0 +1,94 @@
+provider: Heroku
+services:
+  - id: heroku-app
+    name: 'Heroku App (herokuapp.com)'
+    category: platform
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 90
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)\.herokuapp\.com$'
+          asset_id: '$1'
+          label: 'Heroku app: $1'
+        - from: url
+          regex: '(?i)https?://([a-z0-9][a-z0-9-]*)\.herokuapp\.com'
+          asset_id: '$1'
+          label: 'Heroku app: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-herokuapp
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)herokuapp\.com$'
+        weight: 45
+      - id: via-vegur
+        source: header
+        match: regex
+        pattern: '(?i)vegur'
+        weight: 45
+      - id: server-cowboy
+        source: header
+        match: regex
+        pattern: '(?i)cowboy'
+        weight: 20
+      - id: application-error-page
+        source: body
+        match: contains
+        pattern: 'check your logs for details'
+        weight: 45
+      - id: no-such-app-page
+        source: body
+        match: regex
+        pattern: '(?i)no such app'
+        weight: 30
+      - id: x-request-id-header
+        source: header-name
+        match: iequals
+        pattern: 'x-request-id'
+        weight: 15
+    deny:
+      hosts:
+        - 'heroku.com'
+        - '*.heroku.com'
+    knowledge_base:
+      description: 'Heroku is a Salesforce platform-as-a-service (PaaS). Web apps are exposed on *.herokuapp.com (and on custom domains that CNAME to *.herokudns.com / *.herokussl.com) behind the Heroku "vegur" HTTP router, which typically emits a "Via: 1.1 vegur" header and a "Server: Cowboy" header. Discovering a Heroku-hosted asset matters because deployed apps frequently leak secrets in slugs and config vars, expose debug or admin endpoints, run outdated stacks revealed by the default Application Error page, and dangling herokuapp / herokudns CNAMEs are a classic subdomain-takeover vector.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Dangling DNS / subdomain takeover'
+          check: 'Resolve {assetId}.herokuapp.com and any custom-domain CNAME target; if the host returns the Heroku "No such app" / unclaimed page, the app name may be claimable (heroku apps:create {assetId})'
+        - name: 'Content and path discovery'
+          wordlist: 'common-web-paths.txt'
+        - name: 'Exposed VCS metadata / config leakage'
+          check: 'GET https://{assetId}.herokuapp.com/.git/config and /.env - committed slugs sometimes ship secrets'
+        - name: 'Backend stack fingerprint from default error pages'
+          check: 'Request a bad path or method to force the default Heroku Application Error page, then inspect Via and Server headers for the backing framework'
+        - name: 'Exposed admin / debug endpoints'
+          wordlist: 'heroku-admin-paths.txt'
+      verification_steps:
+        - 'Confirm the "Via: 1.1 vegur" response header (Heroku router).'
+        - 'Confirm the "Server: Cowboy" response header.'
+        - 'Check for the X-Request-Id response header, which the Heroku router adds to every request.'
+        - 'Trigger the default Heroku "Application Error" page (crashed / no web dyno) to confirm PaaS hosting.'
+        - 'Resolve DNS: Heroku apps and custom domains CNAME to *.herokudns.com or *.herokussl.com.'
+        - 'For any custom domain, verify the CNAME target is not dangling to rule out subdomain takeover.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.herokuapp.com/'
+        headers: []
+      wordlists:
+        - 'common-web-paths.txt'
+        - 'heroku-admin-paths.txt'
+      references:
+        - 'https://devcenter.heroku.com/articles/http-routing'
+        - 'https://devcenter.heroku.com/articles/error-codes'
+        - 'https://devcenter.heroku.com/articles/error-pages'
+        - 'https://devcenter.heroku.com/articles/http-request-id'
+        - 'https://github.com/heroku/vegur'
+        - 'https://devcenter.heroku.com/articles/custom-domains'
+        - 'https://github.com/EdOverflow/can-i-take-over-xyz'

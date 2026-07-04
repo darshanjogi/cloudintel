@@ -1,0 +1,122 @@
+provider: 'Alibaba Cloud'
+services:
+  - id: alibaba-oss
+    name: 'Alibaba Cloud OSS'
+    category: object-storage
+    severity: information
+    report_threshold: 65
+    bands:
+      medium: 65
+      high: 100
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        # Virtual-hosted style: <bucket>.oss-<region>.aliyuncs.com (region embedded in host)
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.oss-[a-z0-9-]+\.aliyuncs\.com)$'
+          asset_id: '$1'
+          label: 'Alibaba OSS bucket endpoint $1'
+        # Path-style: oss-<region>.aliyuncs.com/<bucket>
+        - from: url
+          regex: '(?i)https?://(oss-[a-z0-9-]+\.aliyuncs\.com/[a-z0-9][a-z0-9-]{1,61}[a-z0-9])'
+          asset_id: '$1'
+          label: 'Alibaba OSS bucket (path-style) $1'
+        # Bare regional/service endpoint with no bucket component
+        - from: host
+          regex: '(?i)^(oss-[a-z0-9-]+\.aliyuncs\.com)$'
+          asset_id: '$1'
+          label: 'Alibaba OSS regional endpoint $1'
+      host_level_fallback: true
+    indicators:
+      # Virtual-hosted bucket host suffix (broad, host-only)
+      - id: host-bucket-vhost
+        source: host
+        match: regex
+        pattern: '(?i)\.oss-[a-z0-9-]+\.aliyuncs\.com$'
+        weight: 40
+      # Bare OSS regional endpoint host
+      - id: host-oss-endpoint
+        source: host
+        match: regex
+        pattern: '(?i)^oss-[a-z0-9-]+\.aliyuncs\.com$'
+        weight: 40
+      # OSS advertises its own server banner
+      - id: server-aliyunoss
+        source: header
+        match: regex
+        pattern: '(?i)^server:\s*aliyunoss'
+        weight: 40
+      # Distinctive OSS request-id response header
+      - id: x-oss-request-id
+        source: header-name
+        match: iequals
+        pattern: 'x-oss-request-id'
+        weight: 30
+      # Object CRC64 checksum header returned on object GET/HEAD
+      - id: x-oss-hash-crc64ecma
+        source: header-name
+        match: iequals
+        pattern: 'x-oss-hash-crc64ecma'
+        weight: 20
+      # Storage-class header returned on object GET/HEAD
+      - id: x-oss-storage-class
+        source: header-name
+        match: iequals
+        pattern: 'x-oss-storage-class'
+        weight: 20
+      # OSS-native error code in XML body
+      - id: xml-nosuchbucket
+        source: xml
+        match: contains
+        pattern: '<Code>NoSuchBucket</Code>'
+        weight: 50
+      # OSS error XML embeds the aliyuncs.com HostId
+      - id: xml-hostid-aliyuncs
+        source: xml
+        match: regex
+        pattern: '(?i)<HostId>[^<]*\.aliyuncs\.com</HostId>'
+        weight: 35
+      # Generic S3-compatible denial code (supporting signal only)
+      - id: xml-accessdenied
+        source: xml
+        match: contains
+        pattern: '<Code>AccessDenied</Code>'
+        weight: 25
+    deny:
+      hosts:
+        - 'www.aliyun.com'
+        - 'help.aliyun.com'
+        - '*.console.aliyun.com'
+        - '*.aliyun.com'
+    knowledge_base:
+      description: 'Alibaba Cloud Object Storage Service (OSS) is an S3-compatible object store. Buckets are reachable virtual-hosted style (<bucket>.oss-<region>.aliyuncs.com) or path-style (oss-<region>.aliyuncs.com/<bucket>). As attack surface it matters because misconfigured buckets expose data via public-read/public-read-write ACLs, anonymous object listing, static website hosting, and permissive CORS. The region is embedded in the endpoint, which is relevant for data-residency findings.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Anonymous bucket listing', check: 'GET https://{assetId}/?list-type=2 without credentials; a returned <ListBucketResult> confirms the bucket is publicly listable' }
+        - { name: 'Public object read', check: 'GET https://{assetId}/<object-key> anonymously; a 200 with object content indicates a public-read object' }
+        - { name: 'Bucket ACL disclosure', check: 'GET https://{assetId}/?acl anonymously; an <AccessControlPolicy> granting public-read or public-read-write reveals an over-permissive ACL' }
+        - { name: 'Static website hosting', check: 'GET https://{assetId}/index.html and /error.html to detect OSS static website configuration' }
+        - { name: 'CORS misconfiguration', check: 'OPTIONS https://{assetId}/ with Origin: https://evil.example and Access-Control-Request-Method: GET; a reflected Access-Control-Allow-Origin reveals permissive CORS' }
+        - { name: 'Write-permission inference', check: 'Observe whether unauthenticated requests return AccessDenied vs success codes; do NOT perform PUT/DELETE (destructive)' }
+        - { name: 'Bucket enumeration', wordlist: 'oss-buckets.txt' }
+      verification_steps:
+        - 'Confirm the host resolves under oss-<region>.aliyuncs.com and returns Server: AliyunOSS together with an x-oss-request-id response header.'
+        - 'Request https://{assetId}/?list-type=2 without credentials; a <ListBucketResult> body confirms the bucket is publicly listable.'
+        - 'Request https://{assetId}/?acl; a returned <AccessControlPolicy> Grant of public-read or public-read-write confirms an over-permissive bucket ACL.'
+        - 'For keys observed in the listing, fetch a few anonymously to confirm data exposure; record file names and sizes as evidence without bulk-downloading sensitive content.'
+        - 'Check for OSS static website hosting by requesting index.html and error.html at the bucket root.'
+        - 'Note the region embedded in the endpoint (e.g. oss-cn-hangzhou, oss-us-west-1) for data-residency and blast-radius reporting.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/?list-type=2'
+        headers: []
+      wordlists:
+        - 'oss-buckets.txt'
+        - 'bucket-names.txt'
+        - 'common-object-keys.txt'
+      references:
+        - 'https://www.alibabacloud.com/help/en/oss/'
+        - 'https://www.alibabacloud.com/help/en/oss/developer-reference/error-responses'
+        - 'https://www.alibabacloud.com/help/en/oss/developer-reference/listobjectsv2'
+        - 'https://www.alibabacloud.com/help/en/oss/user-guide/bucket-acl'

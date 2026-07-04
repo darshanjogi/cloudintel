@@ -1,0 +1,166 @@
+provider: DigitalOcean
+services:
+  - id: digitalocean-spaces
+    name: 'DigitalOcean Spaces'
+    category: object-storage
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 90
+      very_high: 120
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '^([a-z0-9][a-z0-9.\-]*\.[a-z]{2,4}\d\.cdn\.digitaloceanspaces\.com)$'
+          asset_id: '$1'
+          label: 'DigitalOcean Spaces CDN endpoint: $1'
+        - from: host
+          regex: '^([a-z0-9][a-z0-9.\-]*\.[a-z]{2,4}\d\.digitaloceanspaces\.com)$'
+          asset_id: '$1'
+          label: 'DigitalOcean Spaces bucket endpoint: $1'
+        - from: url
+          regex: 'https?://([a-z]{2,4}\d\.digitaloceanspaces\.com/[a-z0-9][a-z0-9.\-]*)'
+          asset_id: '$1'
+          label: 'DigitalOcean Spaces bucket (path-style): $1'
+      host_level_fallback: false
+    indicators:
+      - id: spaces-host
+        source: host
+        match: regex
+        pattern: '\.digitaloceanspaces\.com$'
+        weight: 45
+      - id: spaces-cdn-host
+        source: host
+        match: regex
+        pattern: '\.cdn\.digitaloceanspaces\.com$'
+        weight: 15
+      - id: spaces-amz-request-id
+        source: header-name
+        match: iequals
+        pattern: 'x-amz-request-id'
+        weight: 20
+      - id: spaces-listbucketresult
+        source: xml
+        match: contains
+        pattern: 'ListBucketResult'
+        weight: 33
+      - id: spaces-nosuchbucket
+        source: xml
+        match: contains
+        pattern: '<Code>NoSuchBucket</Code>'
+        weight: 38
+      - id: spaces-access-denied
+        source: xml
+        match: contains
+        pattern: '<Code>AccessDenied</Code>'
+        weight: 28
+    deny:
+      hosts:
+        - 'digitaloceanspaces.com'
+        - 'www.digitaloceanspaces.com'
+    knowledge_base:
+      description: 'DigitalOcean Spaces is an S3-compatible object storage service reached at <bucket>.<region>.digitaloceanspaces.com (optionally fronted by a <bucket>.<region>.cdn.digitaloceanspaces.com CDN edge). Because it speaks the S3 API, buckets can be left world-readable, allow anonymous object listing, expose objects via the CDN, or carry over-broad CORS and bucket policies. Discovering a Space identifies a concrete storage bucket whose ACLs and object inventory should be reviewed. Note that the S3 wire signals (x-amz-request-id header, ListBucketResult/NoSuchBucket/AccessDenied XML) are shared by all S3-compatible stores, so a DigitalOcean host indicator is required before these corroborating signals can push a finding over threshold.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Anonymous bucket listing', check: 'GET https://{assetId}/?list-type=2 and check for an XML ListBucketResult (public/enumerable Space)' }
+        - { name: 'Public object read', check: 'GET https://{assetId}/<object-key> for objects surfaced in the listing or referenced by the app' }
+        - { name: 'Bucket ACL / policy inspection', check: 'GET https://{assetId}/?acl and https://{assetId}/?policy to reveal grants readable anonymously' }
+        - { name: 'CORS misconfiguration', check: 'OPTIONS https://{assetId}/ with Origin: https://evil.example and Access-Control-Request-Method: GET; inspect returned Access-Control-Allow-Origin' }
+        - { name: 'Object key / prefix enumeration', wordlist: 'common-object-keys.txt' }
+        - { name: 'Sibling Space name enumeration', wordlist: 'spaces-bucket-names.txt' }
+      verification_steps:
+        - 'Confirm the host resolves and matches <bucket>.<region>.digitaloceanspaces.com or its .cdn. variant.'
+        - 'Request https://{assetId}/?list-type=2 unauthenticated; a 200 with <ListBucketResult> proves anonymous listing, a 403 <AccessDenied> proves the Space exists but is private, and a 404 <NoSuchBucket> proves it is unclaimed.'
+        - 'For any listed keys, fetch a sample object anonymously and check whether it is intended to be public.'
+        - 'Review ?acl / ?policy output and CORS preflight response for over-permissive grants.'
+        - 'Note whether the CDN endpoint serves the same objects (content may be publicly cached even if origin ACLs change).'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/?list-type=2'
+        headers: []
+      wordlists:
+        - 'spaces-bucket-names.txt'
+        - 'common-object-keys.txt'
+      references:
+        - 'https://docs.digitalocean.com/products/spaces/'
+        - 'https://docs.digitalocean.com/reference/api/spaces-api/'
+        - 'https://docs.digitalocean.com/products/spaces/how-to/set-file-permissions/'
+        - 'https://docs.digitalocean.com/products/spaces/how-to/customize-cors/'
+
+  - id: digitalocean-app-platform
+    name: 'DigitalOcean App Platform'
+    category: platform
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 85
+      very_high: 110
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '^([a-z0-9][a-z0-9\-]*\.ondigitalocean\.app)$'
+          asset_id: '$1'
+          label: 'DigitalOcean App Platform app: $1'
+        - from: url
+          regex: 'https?://([a-z0-9][a-z0-9\-]*\.ondigitalocean\.app)'
+          asset_id: '$1'
+          label: 'DigitalOcean App Platform app: $1'
+      host_level_fallback: false
+    indicators:
+      - id: app-host
+        source: host
+        match: regex
+        pattern: '\.ondigitalocean\.app$'
+        weight: 40
+      - id: app-default-hostname
+        source: host
+        match: regex
+        pattern: '-[a-z0-9]{5}\.ondigitalocean\.app$'
+        weight: 25
+      - id: app-url-ref
+        source: url
+        match: regex
+        pattern: 'https?://[a-z0-9][a-z0-9\-]*\.ondigitalocean\.app'
+        weight: 20
+      - id: app-redirect
+        source: redirect
+        match: regex
+        pattern: '\.ondigitalocean\.app'
+        weight: 25
+    deny:
+      hosts:
+        - 'ondigitalocean.app'
+        - 'www.ondigitalocean.app'
+    knowledge_base:
+      description: 'DigitalOcean App Platform is a managed PaaS that builds and runs apps (services, static sites, workers, functions) from source. Every app gets an auto-generated default hostname of the form <app-name>-<5-char-hash>.ondigitalocean.app that stays live even after a custom domain is attached. App Platform does not emit a distinctive DigitalOcean response header, so detection is hostname-based: the broad .ondigitalocean.app suffix alone stays below threshold and must be corroborated by the specific auto-generated <name>-<hash> default-hostname artifact, a redirect to the platform, or an independent reference before a finding is raised. As attack surface this default hostname often exposes staging/preview builds, admin or internal-tool components without the auth or WAF applied to the production domain, verbose framework error pages, or client bundles containing source maps and embedded secrets.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Default-hostname exposure / control bypass', check: 'GET https://{assetId}/ directly to reach the app without the custom-domain WAF, geo, or auth-proxy layer' }
+        - { name: 'Component and route enumeration', wordlist: 'app-platform-routes.txt' }
+        - { name: 'Exposed build artifacts / config', check: 'GET https://{assetId}/.env, /config.json, /.git/config, /_next/, /static/ for leaked configuration or build output' }
+        - { name: 'JavaScript source map disclosure', wordlist: 'sourcemap-paths.txt' }
+        - { name: 'Unauthenticated internal / admin routes', check: 'GET https://{assetId}/admin, /api/, /debug and confirm whether auth is enforced on the default hostname' }
+        - { name: 'Verbose error / framework fingerprint', check: 'Request invalid paths and malformed inputs and inspect error pages for stack traces or framework version leaks' }
+      verification_steps:
+        - 'Confirm the host ends in .ondigitalocean.app and note whether it matches the auto-generated <name>-<hash> default pattern.'
+        - 'Fetch https://{assetId}/ and compare the response to the production/custom domain to detect a staging or preview build.'
+        - 'Map which component answers (static site vs service) by probing distinct paths and observing response behaviour.'
+        - 'Check for missing security headers (HSTS, CSP, X-Frame-Options) and for auth gaps on sensitive routes reachable via the default hostname.'
+        - 'Probe common leak paths (.env, source maps, /.git) unauthenticated and record any that return data.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/'
+        headers: []
+      wordlists:
+        - 'app-platform-routes.txt'
+        - 'common-web-paths.txt'
+        - 'sourcemap-paths.txt'
+      references:
+        - 'https://docs.digitalocean.com/products/app-platform/'
+        - 'https://docs.digitalocean.com/products/app-platform/how-to/manage-domains/'
+        - 'https://docs.digitalocean.com/products/app-platform/concepts/'
+        - 'https://docs.digitalocean.com/products/app-platform/reference/'

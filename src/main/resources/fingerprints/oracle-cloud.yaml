@@ -1,0 +1,131 @@
+provider: 'Oracle Cloud'
+services:
+  - id: oci-object-storage
+    name: 'OCI Object Storage'
+    category: object-storage
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        # Pre-Authenticated Request (PAR) URL: /p/<token>/n/<namespace>/b/<bucket>/o/<object>
+        - from: url
+          regex: 'objectstorage\.[a-z0-9-]+\.oraclecloud\.com/p/[^/]+/n/[^/]+/b/([^/?#]+)'
+          asset_id: '$1'
+          label: 'OCI Object Storage bucket $1 (via Pre-Authenticated Request)'
+        # Native Object Storage API path: /n/<namespace>/b/<bucket>/o/<object>
+        - from: url
+          regex: 'objectstorage\.[a-z0-9-]+\.oraclecloud\.com/n/[^/]+/b/([^/?#]+)'
+          asset_id: '$1'
+          label: 'OCI Object Storage bucket $1'
+        # Dedicated per-namespace endpoint: <namespace>.objectstorage.<region>.oci.customer-oci.com
+        - from: host
+          regex: '([a-z0-9-]+)\.objectstorage\.[a-z0-9-]+\.oci\.customer-oci\.com$'
+          asset_id: '$1'
+          label: 'OCI Object Storage namespace $1 (dedicated endpoint)'
+        # S3-compatibility endpoint: <namespace>.compat.objectstorage.<region>.oraclecloud.com
+        - from: host
+          regex: '([a-z0-9-]+)\.compat\.objectstorage\.[a-z0-9-]+\.oraclecloud\.com$'
+          asset_id: '$1'
+          label: 'OCI Object Storage namespace $1 (S3-compatible endpoint)'
+        # Regional native endpoint with no parsable bucket in the URL
+        - from: host
+          regex: '^(objectstorage\.[a-z0-9-]+\.oraclecloud\.com)$'
+          asset_id: '$1'
+          label: 'OCI Object Storage endpoint $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-native-endpoint
+        source: host
+        match: regex
+        pattern: '^objectstorage\.[a-z0-9-]+\.oraclecloud\.com$'
+        weight: 40
+      - id: host-dedicated-endpoint
+        source: host
+        match: regex
+        pattern: '\.objectstorage\.[a-z0-9-]+\.oci\.customer-oci\.com$'
+        weight: 40
+      - id: host-s3-compat-endpoint
+        source: host
+        match: regex
+        pattern: '\.compat\.objectstorage\.[a-z0-9-]+\.oraclecloud\.com$'
+        weight: 40
+      - id: header-opc-request-id
+        source: header-name
+        match: iequals
+        pattern: 'opc-request-id'
+        weight: 25
+      - id: url-native-object-path
+        source: url
+        match: regex
+        pattern: '/n/[^/]+/b/[^/]+/o/'
+        weight: 30
+      - id: url-par-path
+        source: url
+        match: regex
+        pattern: '/p/[^/]+/n/[^/]+/b/[^/]+/o/'
+        weight: 35
+      - id: body-bucket-not-found
+        source: body
+        match: regex
+        pattern: '"code"\s*:\s*"BucketNotFound"'
+        weight: 45
+      - id: body-namespace-not-found
+        source: body
+        match: regex
+        pattern: '"code"\s*:\s*"NamespaceNotFound"'
+        weight: 45
+      - id: body-object-not-found
+        source: body
+        match: regex
+        pattern: '"code"\s*:\s*"ObjectNotFound"'
+        weight: 40
+      - id: body-not-authenticated
+        source: body
+        match: regex
+        pattern: '"code"\s*:\s*"(NotAuthenticated|NotAuthorizedOrNotFound)"'
+        weight: 30
+    deny:
+      hosts:
+        - 'console.*.oraclecloud.com'
+        - 'login.*.oraclecloud.com'
+        - 'cloud.oracle.com'
+    knowledge_base:
+      description: 'Oracle Cloud Infrastructure (OCI) Object Storage is Oracle''s durable blob store. Buckets live inside a tenancy namespace and are reached through the native REST API (objectstorage.<region>.oraclecloud.com/n/<namespace>/b/<bucket>/o/<object>), an S3-compatibility endpoint, a Swift endpoint, or time-limited Pre-Authenticated Request (PAR) URLs. Buckets can be set to a public access type (ObjectRead or ObjectReadWithoutList), and PAR tokens embedded in URLs grant bearer-style read or write access, so misconfigured buckets and leaked PARs are the primary exposure of sensitive data.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Anonymous object listing on a public bucket'
+          check: 'GET https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/{assetId}/o/ with no auth; a JSON object list (HTTP 200) indicates a ListObjects-public bucket (access type ObjectRead).'
+        - name: 'Anonymous object read on a public bucket'
+          check: 'GET https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/{assetId}/o/<known-object> with no auth; HTTP 200 indicates ObjectReadWithoutList access even when listing is blocked.'
+        - name: 'Pre-Authenticated Request (PAR) token abuse'
+          check: 'Replay any captured /p/<token>/n/<namespace>/b/{assetId}/o/ URL unauthenticated; determine whether the PAR grants read or write, its object scope, and its expiry.'
+        - name: 'S3-compatibility endpoint anonymous access'
+          check: 'GET https://<namespace>.compat.objectstorage.<region>.oraclecloud.com/{assetId}/ with no credentials to test S3-style anonymous listing/read.'
+        - name: 'Bucket name enumeration within the discovered namespace'
+          wordlist: 'oci-bucket-names.txt'
+        - name: 'Tenancy namespace enumeration'
+          wordlist: 'oci-namespaces.txt'
+      verification_steps:
+        - 'Confirm the host resolves to an Oracle endpoint (objectstorage.<region>.oraclecloud.com, *.oci.customer-oci.com, or *.compat.objectstorage.<region>.oraclecloud.com) and that responses carry an opc-request-id header.'
+        - 'Send an unauthenticated GET to /n/<namespace>/b/{assetId}/o/ and record the HTTP status and JSON code (BucketNotFound, NotAuthenticated, NotAuthorizedOrNotFound, or a 200 listing).'
+        - 'If a listing returns, note whether object names/sizes are disclosed and whether individual objects are readable without auth.'
+        - 'For any PAR URL, check the token scope (single object vs bucket-prefix), access type (read/write), and expiration, and confirm it works without credentials.'
+        - 'Do not modify, upload, or delete objects; limit testing to read/HEAD requests only.'
+      repeater_template:
+        method: GET
+        url: 'https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/{assetId}/o/'
+        headers: []
+      wordlists:
+        - 'oci-bucket-names.txt'
+        - 'oci-namespaces.txt'
+      references:
+        - 'https://docs.oracle.com/en-us/iaas/Content/Object/Concepts/objectstorageoverview.htm'
+        - 'https://docs.oracle.com/en-us/iaas/api/#/en/objectstorage/20160918/'
+        - 'https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usingpreauthenticatedrequests.htm'
+        - 'https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm'
+        - 'https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/managingbuckets.htm'

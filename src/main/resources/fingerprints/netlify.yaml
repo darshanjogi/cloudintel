@@ -1,0 +1,114 @@
+provider: Netlify
+services:
+  - id: netlify-deploy
+    name: 'Netlify (deployments + preview builds)'
+    category: platform
+    severity: low
+    report_threshold: 65
+    bands:
+      medium: 65
+      high: 90
+      very_high: 120
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^deploy-preview-(\d+)--([a-z0-9][a-z0-9-]*)\.netlify\.app$'
+          asset_id: '$2'
+          label: 'Netlify site $2 (deploy preview #$1)'
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)--([a-z0-9][a-z0-9-]*)\.netlify\.app$'
+          asset_id: '$2'
+          label: 'Netlify site $2 (branch/permalink deploy $1)'
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)\.netlify\.app$'
+          asset_id: '$1'
+          label: 'Netlify site $1 (production)'
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)\.netlify\.com$'
+          asset_id: '$1'
+          label: 'Netlify site $1 (legacy netlify.com)'
+      host_level_fallback: true
+    indicators:
+      - id: netlify-deploy-preview-host
+        source: host
+        match: regex
+        pattern: '(?i)^deploy-preview-\d+--[a-z0-9-]+\.netlify\.app$'
+        weight: 40
+      - id: netlify-branch-deploy-host
+        source: host
+        match: regex
+        pattern: '(?i)^(?!deploy-preview-\d+--)[a-z0-9-]+--[a-z0-9-]+\.netlify\.app$'
+        weight: 40
+      - id: netlify-app-host
+        source: host
+        match: regex
+        pattern: '(?i)^(?![a-z0-9-]*--)[a-z0-9-]+\.netlify\.app$'
+        weight: 40
+      - id: netlify-com-host
+        source: host
+        match: regex
+        pattern: '(?i)^[a-z0-9-]+\.netlify\.com$'
+        weight: 25
+      - id: server-netlify-header
+        source: header
+        match: regex
+        pattern: '(?im)^server:\s*netlify'
+        weight: 45
+      - id: nf-request-id-header
+        source: header-name
+        match: iequals
+        pattern: 'x-nf-request-id'
+        weight: 30
+      - id: netlify-functions-path
+        source: url
+        match: regex
+        pattern: '(?i)/\.netlify/functions/'
+        weight: 30
+    deny:
+      hosts:
+        - 'netlify.com'
+        - 'www.netlify.com'
+        - 'app.netlify.com'
+        - 'docs.netlify.com'
+        - 'api.netlify.com'
+        - 'answers.netlify.com'
+        - 'developers.netlify.com'
+    knowledge_base:
+      description: 'Netlify is a Git-driven Jamstack hosting and serverless platform. Static sites plus serverless Functions and Edge Functions are published on *.netlify.app (legacy sites on *.netlify.com). Every branch and pull request also gets an automatically published Deploy Preview or branch deploy at deploy-preview-<PR>--<site>.netlify.app or <branch>--<site>.netlify.app. These preview builds are public by default and frequently expose unreleased features, staging configuration, source maps, backend origins and build-time secrets that were never meant to be internet-facing.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Deploy Preview / branch-deploy enumeration'
+          check: 'Request https://deploy-preview-{N}--{assetId}.netlify.app/ across sequential PR numbers, and try https://main--{assetId}.netlify.app/ and https://staging--{assetId}.netlify.app/ to reach unreleased or staging builds'
+        - name: 'Netlify Functions discovery'
+          check: 'Enumerate https://{assetId}.netlify.app/.netlify/functions/{name} for deployed serverless endpoints and inspect each for missing authorization'
+          wordlist: 'netlify-functions.txt'
+        - name: 'Source map and build-artifact exposure'
+          check: 'Fetch deployed *.js.map files and framework build directories to recover application source and build-time secrets, which are especially common on preview builds'
+        - name: 'Build config and redirect-rule leakage'
+          check: 'Request /netlify.toml and /_redirects to reveal rewrite (status 200 proxy) rules, role-based redirects and backend origin hosts'
+        - name: 'Client-side environment variable leakage'
+          check: 'Grep deployed JS bundles for build-time env prefixes such as NEXT_PUBLIC_, VITE_, REACT_APP_ and GATSBY_ that may embed API keys or tokens'
+        - name: 'Branch and preview subdomain brute force'
+          wordlist: 'netlify-branches.txt'
+      verification_steps:
+        - 'Confirm the response carries Server: Netlify and an x-nf-request-id header.'
+        - 'Resolve the host and confirm it is a *.netlify.app site or a custom domain CNAMEd to Netlify.'
+        - 'Enumerate deploy-preview-<N>--<site>.netlify.app to locate live pull-request previews.'
+        - 'Probe /.netlify/functions/ for deployed serverless functions and test each for missing authentication.'
+        - 'Review deployed JavaScript bundles and source maps for leaked secrets or environment variables.'
+        - 'Inspect /netlify.toml and /_redirects for wildcard proxy rules that could enable open redirect or SSRF.'
+      repeater_template:
+        method: GET
+        url: 'https://deploy-preview-1--{assetId}.netlify.app/'
+        headers: []
+      wordlists:
+        - 'netlify-functions.txt'
+        - 'netlify-branches.txt'
+        - 'common-web-paths.txt'
+      references:
+        - 'https://docs.netlify.com/site-deploys/overview/'
+        - 'https://docs.netlify.com/site-deploys/deploy-previews/'
+        - 'https://docs.netlify.com/functions/overview/'
+        - 'https://docs.netlify.com/routing/redirects/'
+        - 'https://docs.netlify.com/routing/redirects/rewrites-and-proxies/'

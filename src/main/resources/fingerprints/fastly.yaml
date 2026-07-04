@@ -1,0 +1,96 @@
+provider: Fastly
+services:
+  - id: fastly-cdn
+    name: 'Fastly CDN'
+    category: cdn
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 90
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9.-]+\.fastly(?:lb)?\.net)$'
+          asset_id: '$1'
+          label: 'Fastly-hosted host $1'
+        - from: header:x-served-by
+          regex: '(?i)(cache-[a-z0-9]+-[a-z]{3,4})'
+          asset_id: '$1'
+          label: 'Fastly edge cache node $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-fastly-net
+        source: host
+        match: regex
+        pattern: '(?i)\.fastly(?:lb)?\.net$'
+        weight: 40
+      - id: x-served-by-cache-node
+        source: header
+        match: regex
+        pattern: '(?i)x-served-by:\s*.*cache-[a-z0-9]+-[a-z]{3,4}'
+        weight: 30
+      - id: x-timer-fastly-format
+        source: header
+        match: regex
+        pattern: '(?i)x-timer:\s*S\d+(?:\.\d+)?,VS\d+,VE\d+'
+        weight: 30
+      - id: via-1-1-varnish
+        source: header
+        match: regex
+        pattern: '(?i)via:\s*.*\bvarnish\b'
+        weight: 15
+      - id: server-varnish
+        source: header
+        match: regex
+        pattern: '(?i)server:\s*varnish'
+        weight: 15
+      - id: fastly-error-unknown-domain
+        source: body
+        match: contains
+        pattern: 'Fastly error: unknown domain'
+        weight: 55
+    deny:
+      hosts:
+        - 'localhost'
+        - '127.0.0.1'
+        - '*.local'
+        - '*.internal'
+    knowledge_base:
+      description: 'Fastly is an edge-cloud CDN built on customized Varnish that fronts origin servers to cache content and run edge logic (VCL and Compute@Edge). As an intermediary it introduces attack surface distinct from the origin: web cache poisoning via unkeyed request inputs, Host-header / unknown-domain enumeration against shared edge IPs, VCL and backend information disclosure through Fastly-Debug headers, surrogate-key / URL purge abuse, and origin-IP exposure that lets an attacker bypass edge controls (WAF, rate limiting, ACLs).'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Host-header / unknown-domain enumeration'
+          check: 'Request https://{assetId}/ with an unregistered or spoofed Host header against the Fastly edge; a "Fastly error: unknown domain" response body confirms the edge and can reveal whether other services are co-hosted on the same anycast IP.'
+        - name: 'Web cache poisoning via unkeyed headers'
+          check: 'Send unkeyed inputs (X-Forwarded-Host, X-Forwarded-Scheme, X-Host) to {assetId}, then re-request the same URL; a reflected attacker value served on a cache HIT (X-Cache: HIT, incremented X-Cache-Hits) indicates poisoning of the shared cache key.'
+        - name: 'Fastly-Debug information disclosure'
+          check: 'GET https://{assetId}/ with request header Fastly-Debug: 1 and inspect the Fastly-Debug-*, X-Served-By, and cache-state response headers for VCL flow, backend selection, and internal node data leakage.'
+        - name: 'Unauthenticated cache purge'
+          check: 'Send a PURGE request (or a Surrogate-Key purge) to https://{assetId}/ and check whether the edge invalidates cached objects without a valid Fastly-Key / authentication token.'
+        - name: 'Origin IP exposure behind the edge'
+          check: 'Enumerate historical DNS records and TLS certificate SANs for {assetId} to locate the origin server that responds directly, bypassing Fastly edge protections.'
+        - name: 'Fastly-fronted subdomain / service enumeration'
+          wordlist: 'fastly-hosts.txt'
+      verification_steps:
+        - 'Send GET https://{assetId}/ with header "Fastly-Debug: 1" and confirm Fastly-Debug-* / X-Served-By response headers appear.'
+        - 'Compare X-Served-By values across repeated requests to map the serving POPs and cache nodes.'
+        - 'Request the edge IP with an unregistered Host header and confirm the "Fastly error: unknown domain" synthetic error page.'
+        - 'Inspect X-Cache and X-Cache-Hits to confirm caching is active before attempting cache-poisoning tests.'
+        - 'Send an unauthenticated PURGE request and observe whether the object is invalidated or the request is rejected.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/'
+        headers:
+          - 'Host: {assetId}'
+          - 'Fastly-Debug: 1'
+      wordlists:
+        - 'fastly-hosts.txt'
+        - 'cache-poisoning-headers.txt'
+      references:
+        - 'https://developer.fastly.com/reference/http/http-headers/'
+        - 'https://docs.fastly.com/en/guides/purging'
+        - 'https://portswigger.net/web-security/web-cache-poisoning'
+        - 'https://owasp.org/www-community/attacks/Cache_Poisoning'

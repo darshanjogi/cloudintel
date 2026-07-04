@@ -1,0 +1,113 @@
+provider: BunnyCDN
+services:
+  - id: bunnycdn-cdn
+    name: BunnyCDN
+    category: cdn
+    severity: information
+    report_threshold: 70
+    bands:
+      medium: 70
+      high: 100
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)\.b-cdn\.net$'
+          asset_id: '$1'
+          label: 'BunnyCDN pull zone: $1.b-cdn.net'
+        - from: host
+          regex: '(?i)^((?:[a-z0-9-]+\.)?storage\.bunnycdn\.com)$'
+          asset_id: '$1'
+          label: 'Bunny Edge Storage endpoint: $1'
+        - from: 'header:CDN-PullZone'
+          regex: '^\s*(\d+)\s*$'
+          asset_id: '$1'
+          label: 'BunnyCDN pull zone id: $1'
+      host_level_fallback: true
+    indicators:
+      - id: server-header-bunnycdn
+        source: header
+        match: regex
+        pattern: '(?i)(?:^|\n)server:\s*BunnyCDN-[A-Z0-9]{2,}'
+        weight: 45
+      - id: host-b-cdn-net
+        source: host
+        match: regex
+        pattern: '(?i)\.b-cdn\.net$'
+        weight: 40
+      - id: host-bunny-edge-storage
+        source: host
+        match: regex
+        pattern: '(?i)(?:^|\.)storage\.bunnycdn\.com$'
+        weight: 40
+      - id: cdn-pullzone-header
+        source: header-name
+        match: iequals
+        pattern: 'CDN-PullZone'
+        weight: 30
+      - id: cdn-cache-header
+        source: header-name
+        match: iequals
+        pattern: 'CDN-Cache'
+        weight: 20
+      - id: cdn-requestcountrycode-header
+        source: header-name
+        match: iequals
+        pattern: 'CDN-RequestCountryCode'
+        weight: 20
+      - id: cdn-uid-header
+        source: header-name
+        match: iequals
+        pattern: 'CDN-Uid'
+        weight: 15
+      - id: host-api-bunny-net
+        source: host
+        match: regex
+        pattern: '(?i)^api\.bunny\.net$'
+        weight: 30
+      - id: host-fonts-bunny-net
+        source: host
+        match: regex
+        pattern: '(?i)^fonts\.bunny\.net$'
+        weight: 25
+    deny:
+      hosts:
+        - 'www.bunny.net'
+        - 'bunny.net'
+        - 'dash.bunny.net'
+        - 'docs.bunny.net'
+        - 'support.bunny.net'
+    knowledge_base:
+      description: 'BunnyCDN (bunny.net) is a global pull/push content delivery network. Sites are fronted by edge Pull Zones (default hostname <zone>.b-cdn.net, often CNAMEd to a custom domain) that cache from a configured origin, plus Edge Storage zones (storage.bunnycdn.com and regional replicas) and Bunny Stream video zones. As passive attack surface it can reveal the hidden origin, expose misconfigured or world-writable Edge Storage zones, and use optional URL token authentication that is frequently misconfigured, enabling hotlink/token bypass and edge cache poisoning.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Origin IP discovery / edge bypass'
+          check: 'Edge responses carry CDN-PullZone {assetId} and Server: BunnyCDN-*. Find the true origin (historical DNS, SPF/MX, TLS cert SANs, favicon hash) and request it directly with the target Host header to bypass the CDN and any WAF/token auth.'
+        - name: 'Pull zone / subdomain enumeration'
+          wordlist: 'bunnycdn-pullzones.txt'
+        - name: 'Edge Storage zone access & write test'
+          check: 'GET https://storage.bunnycdn.com/{assetId}/ and regional hosts (ny./la./sg./syd./uk./se.storage.bunnycdn.com) with no AccessKey header to test anonymous listing/read; attempt PUT/DELETE of a benign path to check for a world-writable storage zone.'
+        - name: 'URL token authentication bypass'
+          check: 'If protected paths use Bunny token auth, replay the URL after the token/expiry expires and fuzz the token, token_path and expires query parameters to check signature validation and path scoping.'
+        - name: 'Edge cache poisoning via unkeyed input'
+          check: 'Send unkeyed request headers (X-Forwarded-Host, X-Forwarded-Scheme, X-Forwarded-For) and duplicate/odd query strings, then re-request to see if a poisoned response is served from cache (observe CDN-Cache: HIT).'
+        - name: 'Content path / backup file discovery on edge'
+          wordlist: 'cdn-common-paths.txt'
+      verification_steps:
+        - 'curl -sI https://{assetId}.b-cdn.net/ and confirm a Server: BunnyCDN-<POP> header (e.g. BunnyCDN-DE1-1023) plus CDN-PullZone, CDN-Cache and CDN-RequestCountryCode response headers.'
+        - 'Resolve the target hostname and confirm it CNAMEs to <zone>.b-cdn.net or that response headers include the CDN-* header family.'
+        - 'Request a cacheable asset twice and observe CDN-Cache transition from MISS to HIT to confirm edge caching behaviour.'
+        - 'For suspected Edge Storage, request storage.bunnycdn.com/<zone>/ without an AccessKey and record whether a 401 {"HttpCode":401,"Message":"Unauthorized"} or a directory listing is returned.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.b-cdn.net/'
+        headers: []
+      wordlists:
+        - 'bunnycdn-pullzones.txt'
+        - 'cdn-common-paths.txt'
+      references:
+        - 'https://docs.bunny.net/'
+        - 'https://docs.bunny.net/docs/cdn-token-authentication-basics'
+        - 'https://docs.bunny.net/reference/storage-api'
+        - 'https://support.bunny.net/'

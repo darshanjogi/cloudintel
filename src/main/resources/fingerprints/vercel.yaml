@@ -1,0 +1,127 @@
+provider: 'Vercel'
+services:
+  - id: 'vercel-deployment'
+    name: 'Vercel Deployment / Preview URL'
+    category: 'platform'
+    severity: 'information'
+    report_threshold: 65
+    bands:
+      medium: 65
+      high: 95
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        # First match wins. Preview deployments use a "-git-<branch>-<team>" infix.
+        - from: 'host'
+          regex: '(?i)^([a-z0-9][a-z0-9-]*)-git-[a-z0-9-]+\.vercel\.app$'
+          asset_id: '$1'
+          label: 'Vercel preview deployment (project $1)'
+        # Generic deployment / production alias: <name>.vercel.app
+        - from: 'host'
+          regex: '(?i)^([a-z0-9-]+)\.vercel\.app$'
+          asset_id: '$1'
+          label: 'Vercel deployment $1.vercel.app'
+        # Legacy ZEIT Now deployment: <name>.now.sh
+        - from: 'host'
+          regex: '(?i)^([a-z0-9-]+)\.now\.sh$'
+          asset_id: '$1'
+          label: 'Legacy Vercel (Now) deployment $1.now.sh'
+      host_level_fallback: true
+    indicators:
+      # --- Host suffixes (real, provider-anchored) ---
+      - id: 'host-vercel-app'
+        source: 'host'
+        match: 'regex'
+        pattern: '(?i)(^|\.)vercel\.app$'
+        weight: 40
+      - id: 'host-preview-git-infix'
+        source: 'host'
+        match: 'regex'
+        pattern: '(?i)-git-[a-z0-9-]+\.vercel\.app$'
+        weight: 25
+      - id: 'host-now-sh-legacy'
+        source: 'host'
+        match: 'regex'
+        pattern: '(?i)(^|\.)now\.sh$'
+        weight: 35
+      # --- Vercel edge response headers (real) ---
+      - id: 'hdr-x-vercel-id'
+        source: 'header-name'
+        match: 'iequals'
+        pattern: 'x-vercel-id'
+        weight: 45
+      - id: 'hdr-x-vercel-cache'
+        source: 'header-name'
+        match: 'iequals'
+        pattern: 'x-vercel-cache'
+        weight: 30
+      - id: 'hdr-x-vercel-error'
+        source: 'header-name'
+        match: 'iequals'
+        pattern: 'x-vercel-error'
+        weight: 40
+      - id: 'hdr-x-matched-path'
+        source: 'header-name'
+        match: 'iequals'
+        pattern: 'x-matched-path'
+        weight: 20
+      - id: 'hdr-server-vercel'
+        source: 'header'
+        match: 'regex'
+        pattern: '(?i)server:\s*vercel'
+        weight: 30
+      # --- Legacy ZEIT Now edge header ---
+      - id: 'hdr-x-now-id-legacy'
+        source: 'header-name'
+        match: 'iequals'
+        pattern: 'x-now-id'
+        weight: 20
+      # --- Error body / error page content (real Vercel error codes) ---
+      - id: 'body-deployment-not-found'
+        source: 'body'
+        match: 'contains'
+        pattern: 'DEPLOYMENT_NOT_FOUND'
+        weight: 40
+      - id: 'body-function-invocation-failed'
+        source: 'body'
+        match: 'contains'
+        pattern: 'FUNCTION_INVOCATION_FAILED'
+        weight: 35
+    deny:
+      hosts:
+        - 'vercel.com'
+        - 'www.vercel.com'
+        - 'vercel.app'
+        - 'assets.vercel.com'
+    knowledge_base:
+      description: 'Vercel is a frontend/edge hosting platform (Next.js, static sites, and serverless/edge Functions). Every git push produces an immutable deployment reachable at a *.vercel.app URL; branch and commit pushes additionally create preview URLs (project-git-branch-team.vercel.app). Preview deployments frequently point at staging back ends, non-production secrets, and pre-release features, and are often left publicly reachable, so an exposed preview URL is meaningful attack surface. Serverless/edge Functions under /api are also served from these hosts.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Publicly reachable preview deployment', check: 'GET https://{assetId}.vercel.app/ and any observed -git- preview host; confirm it renders without auth and check whether it targets a staging/non-prod backend' }
+        - { name: 'Deployment Protection bypass token', check: 'If a preview returns 401/password gate, test whether an x-vercel-protection-bypass header or ?x-vercel-protection-bypass=<token> query param (with x-vercel-set-bypass-cookie) grants access' }
+        - { name: 'Serverless / edge Function enumeration', wordlist: 'vercel-api-routes.txt' }
+        - { name: 'Next.js data & build-output exposure', check: 'GET /_next/data/<buildId>/*.json and /_next/static/*; look for leaked props, tokens, or internal API hostnames' }
+        - { name: 'Source map exposure', wordlist: 'nextjs-paths.txt' }
+        - { name: 'Deployment / alias enumeration via error codes', check: 'Request candidate *.vercel.app hosts and read x-vercel-error (DEPLOYMENT_NOT_FOUND vs DEPLOYMENT_DISABLED vs NOT_FOUND) to distinguish existing from missing deployments' }
+        - { name: 'Environment / region disclosure', check: 'Inspect x-vercel-id (region::hash) and x-vercel-cache values across paths to map edge regions and caching behavior' }
+      verification_steps:
+        - 'Confirm the host resolves under *.vercel.app (or legacy *.now.sh) and that responses carry a server: Vercel header plus an x-vercel-id header.'
+        - 'Load the deployment URL in a browser and note whether it is production (project.vercel.app) or a preview (project-git-branch-team.vercel.app or project-<hash>-team.vercel.app).'
+        - 'For a preview URL, determine whether Deployment Protection is enabled (401/redirect to a Vercel auth/password page) or whether it is fully public.'
+        - 'Enumerate /api/* and /_next/* paths and review responses for serverless function behavior, source maps, and leaked build data.'
+        - 'Trigger a 404 (random path) and read the x-vercel-error header and error page body (e.g. DEPLOYMENT_NOT_FOUND, NOT_FOUND) to confirm the Vercel edge and deployment state.'
+      repeater_template:
+        method: 'GET'
+        url: 'https://{assetId}.vercel.app/'
+        headers: []
+      wordlists:
+        - 'vercel-api-routes.txt'
+        - 'nextjs-paths.txt'
+        - 'vercel-preview-aliases.txt'
+      references:
+        - 'https://vercel.com/docs/errors'
+        - 'https://vercel.com/docs/edge-network/headers'
+        - 'https://vercel.com/docs/deployments/preview-deployments'
+        - 'https://vercel.com/docs/security/deployment-protection'
+        - 'https://vercel.com/docs/edge-network/caching'

@@ -1,0 +1,127 @@
+provider: Backblaze
+services:
+  - id: backblaze-b2
+    name: 'Backblaze B2 Cloud Storage'
+    category: object-storage
+    severity: information
+    report_threshold: 65
+    bands:
+      medium: 65
+      high: 100
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        # First match wins. Prefer a concrete bucket identity, then fall back to endpoint host.
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])\.s3\.[a-z0-9-]+\.backblazeb2\.com$'
+          asset_id: '$1'
+          label: 'Backblaze B2 bucket "$1" (S3 virtual-hosted endpoint)'
+        - from: url
+          regex: '(?i)https?://s3\.[a-z0-9-]+\.backblazeb2\.com/([^/?#]+)'
+          asset_id: '$1'
+          label: 'Backblaze B2 bucket "$1" (S3 path-style endpoint)'
+        - from: url
+          regex: '(?i)https?://f[0-9]+\.backblazeb2\.com/file/([^/?#]+)/'
+          asset_id: '$1'
+          label: 'Backblaze B2 bucket "$1" (native friendly download URL)'
+        - from: host
+          regex: '(?i)^((?:api|f)[0-9]*\.backblazeb2\.com|s3\.[a-z0-9-]+\.backblazeb2\.com)$'
+          asset_id: '$1'
+          label: 'Backblaze B2 endpoint host $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-backblazeb2
+        source: host
+        match: regex
+        pattern: '(?i)\.backblazeb2\.com$'
+        weight: 40
+      - id: host-s3-endpoint
+        source: host
+        match: regex
+        pattern: '(?i)^(?:[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\.)?s3\.[a-z0-9-]+\.backblazeb2\.com$'
+        weight: 20
+      - id: host-native-download
+        source: host
+        match: regex
+        pattern: '(?i)^f[0-9]+\.backblazeb2\.com$'
+        weight: 20
+      - id: host-native-api
+        source: host
+        match: regex
+        pattern: '(?i)^api[0-9]*\.backblazeb2\.com$'
+        weight: 20
+      - id: hdr-bz-file-id
+        source: header-name
+        match: iequals
+        pattern: 'x-bz-file-id'
+        weight: 45
+      - id: hdr-bz-file-name
+        source: header-name
+        match: iequals
+        pattern: 'x-bz-file-name'
+        weight: 40
+      - id: hdr-bz-content-sha1
+        source: header-name
+        match: iequals
+        pattern: 'x-bz-content-sha1'
+        weight: 40
+      - id: hdr-bz-upload-timestamp
+        source: header-name
+        match: iequals
+        pattern: 'x-bz-upload-timestamp'
+        weight: 30
+      - id: hdr-bz-info
+        source: header-name
+        match: regex
+        pattern: '(?i)^x-bz-info-'
+        weight: 25
+      - id: body-b2-native-error
+        source: body
+        match: regex
+        pattern: '(?i)"code"\s*:\s*"(?:not_found|bad_request|unauthorized|bad_auth_token|expired_auth_token|bad_bucket_id|file_not_present|cap_exceeded)"'
+        weight: 45
+      - id: xml-s3-nosuchbucket
+        source: xml
+        match: contains
+        pattern: 'NoSuchBucket'
+        weight: 40
+      - id: body-authorize-response
+        source: body
+        match: regex
+        pattern: '(?i)"s3apiurl"\s*:\s*"https://s3\.[a-z0-9-]+\.backblazeb2\.com"'
+        weight: 40
+    deny:
+      hosts:
+        - 'www.backblaze.com'
+        - 'help.backblaze.com'
+        - 'status.backblaze.com'
+        - 'secure.backblaze.com'
+        - 'www.backblazeb2.com'
+    knowledge_base:
+      description: 'Backblaze B2 is an S3-compatible object-storage service. Buckets are reachable both through the native B2 API (api / apiNNN / fNNN download hosts on backblazeb2.com, with friendly download URLs of the form /file/<bucket>/<key>) and through the S3-compatible API (s3.<region>.backblazeb2.com, path-style or virtual-hosted). As object storage it is a common source of data exposure: public buckets, world-readable objects, permissive CORS, and leaked application keys (keyID + applicationKey) embedded in client code.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Anonymous public file download', check: 'GET https://f004.backblazeb2.com/file/{assetId}/ and known key paths to see if objects are served without auth (public bucket).' }
+        - { name: 'S3 anonymous object listing', check: 'GET https://s3.us-west-004.backblazeb2.com/{assetId}?list-type=2 with no credentials to attempt unauthenticated ListObjectsV2.' }
+        - { name: 'CORS misconfiguration', check: 'Send OPTIONS / GET with an arbitrary Origin header to {assetId} and inspect Access-Control-Allow-Origin for an over-permissive (* or reflected) policy.' }
+        - { name: 'Leaked application keys', check: 'Search reachable client JS, mobile bundles, and config for a B2 keyID + applicationKey pair usable against b2_authorize_account.' }
+        - { name: 'Bucket name enumeration', wordlist: 'backblaze-b2-buckets.txt' }
+        - { name: 'Object key brute force', wordlist: 'common-object-keys.txt' }
+      verification_steps:
+        - 'Confirm the host resolves under *.backblazeb2.com and note whether it is an s3.<region> endpoint or an fNNN native download host.'
+        - 'Request a nonexistent object/bucket and confirm a B2-specific error: native JSON {"code":"not_found",...,"status":404} or S3 XML <Code>NoSuchBucket</Code>.'
+        - 'On a native download response, verify the X-Bz-File-Id / X-Bz-File-Name / X-Bz-Content-Sha1 headers are present.'
+        - 'Attempt an unauthenticated bucket listing and an anonymous object fetch; record whether access is allowed (public) or denied.'
+        - 'Check CORS by replaying a request with a foreign Origin and reviewing the returned Access-Control-Allow-Origin header.'
+      repeater_template:
+        method: GET
+        url: 'https://f004.backblazeb2.com/file/{assetId}/'
+        headers: []
+      wordlists:
+        - 'backblaze-b2-buckets.txt'
+        - 'common-object-keys.txt'
+      references:
+        - 'https://www.backblaze.com/apidocs'
+        - 'https://www.backblaze.com/docs/cloud-storage-s3-compatible-api'
+        - 'https://www.backblaze.com/docs/cloud-storage-friendly-urls'

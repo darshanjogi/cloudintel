@@ -1,0 +1,90 @@
+provider: Wasabi
+services:
+  - id: wasabi-object-storage
+    name: 'Wasabi Hot Cloud Storage (S3-compatible)'
+    category: object-storage
+    severity: low
+    report_threshold: 70
+    bands:
+      medium: 70
+      high: 100
+      very_high: 140
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        # Virtual-hosted-style bucket: <bucket>.s3.wasabisys.com or <bucket>.s3.<region>.wasabisys.com
+        - from: host
+          regex: '^([a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])\.s3(?:\.[a-z0-9-]+)?\.wasabisys\.com$'
+          asset_id: '$1'
+          label: 'Wasabi bucket $1 (virtual-hosted-style)'
+        # Path-style bucket: https://s3.wasabisys.com/<bucket>/... or https://s3.<region>.wasabisys.com/<bucket>/...
+        - from: url
+          regex: 's3(?:\.[a-z0-9-]+)?\.wasabisys\.com/([a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])'
+          asset_id: '$1'
+          label: 'Wasabi bucket $1 (path-style)'
+      host_level_fallback: true
+    indicators:
+      # Distinctive: Wasabi service host suffix. Anchored to wasabisys.com so generic words cannot match.
+      - id: host-wasabisys-s3
+        source: host
+        match: regex
+        pattern: '(?i)(?:^|\.)s3(?:\.[a-z0-9-]+)?\.wasabisys\.com$'
+        weight: 50
+      # Distinctive: Wasabi identifies its storage server as "WasabiS3" (AWS S3 returns "AmazonS3").
+      - id: server-header-wasabis3
+        source: header
+        match: regex
+        pattern: '(?im)^Server:\s*WasabiS3'
+        weight: 50
+      # Shared with AWS S3 API (Wasabi is S3-compatible). Standard S3 error codes in the XML body.
+      - id: s3-error-xml-code
+        source: xml
+        match: regex
+        pattern: '<Code>(?:NoSuchBucket|PermanentRedirect|AccessDenied|NoSuchKey|AllAccessDisabled|InvalidBucketName)</Code>'
+        weight: 30
+      # Shared with AWS S3: request tracing header returned on every S3 API response.
+      - id: header-x-amz-request-id
+        source: header-name
+        match: iequals
+        pattern: 'x-amz-request-id'
+        weight: 15
+      # Shared with AWS S3: secondary request-id / extended request id header.
+      - id: header-x-amz-id-2
+        source: header-name
+        match: iequals
+        pattern: 'x-amz-id-2'
+        weight: 10
+    deny:
+      hosts:
+        - 'console.wasabisys.com'
+        - 'wasabi.com'
+        - '*.wasabi.com'
+    knowledge_base:
+      description: 'Wasabi Hot Cloud Storage is an S3-API-compatible object storage service hosted under wasabisys.com (root endpoint s3.wasabisys.com plus regional endpoints such as s3.us-east-2.wasabisys.com and s3.eu-central-1.wasabisys.com). Buckets are addressable virtual-hosted-style (bucket.s3.wasabisys.com) or path-style (s3.wasabisys.com/bucket). As with AWS S3, misconfigured bucket policies/ACLs can expose object listings, allow anonymous reads, or permit unauthenticated writes, making an identified bucket meaningful reconnaissance surface.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Anonymous bucket listing', check: 'GET https://{assetId}.s3.wasabisys.com/?list-type=2 (200 + ListBucketResult XML means public listing; AccessDenied means the bucket exists but listing is restricted)' }
+        - { name: 'Public object read', check: 'GET https://{assetId}.s3.wasabisys.com/<key> for a known/enumerated key; 200 indicates anonymous read is allowed' }
+        - { name: 'Bucket existence vs region redirect', check: 'GET https://s3.wasabisys.com/{assetId}/ and inspect for 301 PermanentRedirect (bucket lives in another Wasabi region) vs 404 NoSuchBucket vs 403 AccessDenied' }
+        - { name: 'Unauthenticated write / ACL test', check: 'PUT of a benign 0-byte object to a discovered bucket ONLY with explicit written authorization; observe 200 vs 403 to detect world-writable misconfiguration' }
+        - { name: 'Bucket name enumeration', wordlist: 'wasabi-buckets.txt' }
+      verification_steps:
+        - 'Confirm the host resolves under *.wasabisys.com and returns S3-style XML (ListBucketResult or Error with an S3 <Code>).'
+        - 'Check the Server response header equals WasabiS3 (distinguishes Wasabi from AWS S3, which returns AmazonS3).'
+        - 'Request GET https://{assetId}.s3.wasabisys.com/?list-type=2 and record status: 200 (public listing), 403 AccessDenied (exists, private), 404 NoSuchBucket (absent), or 301 PermanentRedirect (wrong region).'
+        - 'If listing is public, sample a few returned object keys with GET to confirm anonymous object read.'
+        - 'Do not attempt writes, deletes, or ACL changes without explicit written scope authorization.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.s3.wasabisys.com/?list-type=2'
+        headers: []
+      wordlists:
+        - 'wasabi-buckets.txt'
+        - 's3-bucket-names.txt'
+        - 'common-bucket-names.txt'
+      references:
+        - 'https://docs.wasabi.com/'
+        - 'https://knowledgebase.wasabi.com/'
+        - 'https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html'
+        - 'https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html'
+        - 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html'

@@ -1,0 +1,555 @@
+provider: Azure
+
+services:
+  # =========================================================================
+  - id: azure-blob-storage
+    name: 'Azure Blob Storage'
+    category: object-storage
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9]{3,24})\.blob\.core\.windows\.net'
+          asset_id: '$1'
+          label: 'Azure Blob storage account: $1'
+        - from: url
+          regex: '(?i)://[a-z0-9]{3,24}\.blob\.core\.windows\.net/([a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9]))'
+          asset_id: '$1'
+          label: 'Azure Blob container: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-suffix
+        source: host
+        match: regex
+        pattern: '(?i)\.blob\.core\.windows\.net'
+        weight: 40
+      - id: server-header
+        source: header
+        match: contains
+        pattern: 'Windows-Azure-Blob'
+        weight: 35
+      - id: x-ms-version-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-version'
+        weight: 20
+      - id: x-ms-request-id-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-request-id'
+        weight: 15
+      - id: storage-error-code
+        source: body
+        match: regex
+        pattern: '(?i)<Code>(BlobNotFound|ContainerNotFound|ResourceNotFound|AuthenticationFailed|PublicAccessNotPermitted|InvalidQueryParameterValue)</Code>'
+        weight: 45
+    knowledge_base:
+      description: 'Azure Blob Storage is object storage on <account>.blob.core.windows.net. Containers or blobs configured with public/anonymous access, or a container-level SAS leak, can expose data; account and container names are enumerable via DNS/HTTP.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Anonymous container enumeration'
+          check: 'GET https://{assetId}.blob.core.windows.net/?comp=list  (unauthenticated account-level list)'
+        - name: 'Anonymous blob listing in a container'
+          check: 'GET https://{assetId}.blob.core.windows.net/<container>?restype=container&comp=list'
+        - name: 'Container name brute-force'
+          wordlist: 'azure-blob-containers.txt'
+        - name: 'Storage account name brute-force via DNS'
+          wordlist: 'azure-storage-accounts.txt'
+      verification_steps:
+        - 'Request https://{assetId}.blob.core.windows.net/?comp=list and inspect for an EnumerationResults XML body vs. an AuthenticationFailed / PublicAccessNotPermitted error.'
+        - 'For a discovered container, GET ?restype=container&comp=list and check whether blob names/URLs are returned without credentials.'
+        - 'Confirm the Server response header contains Windows-Azure-Blob and note the x-ms-version value.'
+        - 'Check for a $web static-website container and any world-readable blobs (images, backups, .bak, .sql, .env).'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.blob.core.windows.net/?comp=list'
+        headers:
+          - 'x-ms-version: 2021-08-06'
+      wordlists:
+        - 'azure-blob-containers.txt'
+        - 'azure-storage-accounts.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/list-containers2'
+        - 'https://learn.microsoft.com/en-us/azure/storage/blobs/anonymous-read-access-configure'
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/status-and-error-codes2'
+
+  # =========================================================================
+  - id: azure-functions
+    name: 'Azure Functions'
+    category: serverless
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 90
+      very_high: 120
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9][a-z0-9-]{0,58}[a-z0-9])\.azurewebsites\.net'
+          asset_id: '$1'
+          label: 'Azure Functions / App Service app: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-suffix
+        source: host
+        match: regex
+        pattern: '(?i)\.azurewebsites\.net'
+        weight: 40
+      - id: scm-kudu-host
+        source: host
+        match: regex
+        pattern: '(?i)\.scm\.azurewebsites\.net'
+        weight: 20
+      - id: arr-affinity-cookie
+        source: cookie
+        match: regex
+        pattern: '(?i)ARRAffinity(SameSite)?='
+        weight: 30
+      - id: functions-landing-page
+        source: body
+        match: regex
+        pattern: '(?i)Your Functions (\d+\.\d+ )?app is up and running'
+        weight: 40
+      - id: powered-by-aspnet
+        source: header
+        match: contains
+        pattern: 'ASP.NET'
+        weight: 15
+    deny:
+      hosts:
+        - '*.scm.azurewebsites.us'
+    knowledge_base:
+      description: 'Azure Functions / App Service apps are hosted on <app>.azurewebsites.net, with the Kudu/SCM deployment console on <app>.scm.azurewebsites.net. HTTP-triggered functions may expose anonymous endpoints, function keys in URLs, or verbose stack traces; the SCM site can leak deployment info.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Anonymous HTTP-trigger discovery'
+          check: 'GET https://{assetId}.azurewebsites.net/api/<functionName>  (authLevel=anonymous returns 200 without a code= key)'
+        - name: 'Kudu / SCM console exposure'
+          check: 'GET https://{assetId}.scm.azurewebsites.net/  (deployment console, requires auth when locked down)'
+        - name: 'Function route brute-force'
+          wordlist: 'azure-functions-routes.txt'
+        - name: 'Verbose error / stack-trace probing'
+          check: 'Send malformed input to a known route and inspect for .NET/Node stack traces disclosing paths.'
+      verification_steps:
+        - 'GET https://{assetId}.azurewebsites.net/ and check for the default "Your Functions app is up and running" landing page vs. a custom app.'
+        - 'Look for the ARRAffinity / ARRAffinitySameSite cookies confirming Azure App Service ARR load balancing.'
+        - 'Probe /api/<name> routes without a code= query key to identify anonymous authLevel functions.'
+        - 'Check https://{assetId}.scm.azurewebsites.net/ for an exposed Kudu console or /api/settings leakage.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.azurewebsites.net/'
+        headers: []
+      wordlists:
+        - 'azure-functions-routes.txt'
+        - 'azure-appservice-paths.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-http-webhook-trigger'
+        - 'https://learn.microsoft.com/en-us/azure/app-service/configure-common'
+        - 'https://github.com/projectkudu/kudu/wiki/Accessing-the-kudu-service'
+
+  # =========================================================================
+  - id: azure-cdn
+    name: 'Azure CDN / Front Door'
+    category: cdn
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 90
+      very_high: 120
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9-]{1,63})\.azureedge\.net'
+          asset_id: '$1'
+          label: 'Azure CDN endpoint: $1'
+        - from: host
+          regex: '(?i)([a-z0-9-]{1,63})\.(?:z[0-9]{2}\.)?azurefd\.net'
+          asset_id: '$1'
+          label: 'Azure Front Door endpoint: $1'
+      host_level_fallback: true
+    indicators:
+      - id: azureedge-host
+        source: host
+        match: regex
+        pattern: '(?i)\.azureedge\.net'
+        weight: 40
+      - id: azurefd-host
+        source: host
+        match: regex
+        pattern: '(?i)\.azurefd\.net'
+        weight: 40
+      - id: x-azure-ref-header
+        source: header-name
+        match: iequals
+        pattern: 'x-azure-ref'
+        weight: 30
+      - id: x-msedge-ref-header
+        source: header-name
+        match: iequals
+        pattern: 'x-msedge-ref'
+        weight: 25
+      - id: x-cache-header
+        source: header-name
+        match: iequals
+        pattern: 'x-cache'
+        weight: 15
+    deny:
+      hosts:
+        - '*.aspnetcdn.com'
+        - 'ajax.aspnetcdn.com'
+    knowledge_base:
+      description: 'Azure CDN endpoints (*.azureedge.net) and Azure Front Door endpoints (*.azurefd.net) front origin content and APIs. Misconfigured origins, cache poisoning, host-header routing gaps, or an unclaimed/decommissioned endpoint (subdomain takeover) are the primary risks.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Origin / backend disclosure'
+          check: 'Inspect x-azure-ref, x-msedge-ref and X-Cache headers; compare responses to the origin host to map the backend.'
+        - name: 'Subdomain takeover of a dangling endpoint'
+          check: 'Resolve the customer CNAME to {assetId}.azureedge.net and check for a "The specified endpoint... could not be found" / 404 claim page.'
+        - name: 'Cache poisoning via unkeyed headers'
+          check: 'Vary X-Forwarded-Host / caching headers and observe whether poisoned responses are served from cache (X-Cache: TCP_HIT).'
+        - name: 'Endpoint name brute-force'
+          wordlist: 'azure-cdn-endpoints.txt'
+      verification_steps:
+        - 'Confirm the CNAME chain terminates at *.azureedge.net or *.azurefd.net and note whether the endpoint currently resolves to a live origin.'
+        - 'Inspect x-azure-ref / x-msedge-ref request-id headers and the X-Cache HIT/MISS status.'
+        - 'For a dangling CNAME, check the endpoint response for an unclaimed-resource error indicating takeover potential.'
+        - 'Test cache behavior with benign header variations to gauge cache-key hygiene (no destructive payloads).'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.azureedge.net/'
+        headers: []
+      wordlists:
+        - 'azure-cdn-endpoints.txt'
+        - 'azure-frontdoor-endpoints.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/azure/cdn/cdn-overview'
+        - 'https://learn.microsoft.com/en-us/azure/frontdoor/front-door-overview'
+        - 'https://learn.microsoft.com/en-us/azure/security/fundamentals/subdomain-takeover'
+
+  # =========================================================================
+  - id: azure-cosmos-db
+    name: 'Azure Cosmos DB'
+    category: database
+    severity: low
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9-]{3,50})\.documents\.azure\.com'
+          asset_id: '$1'
+          label: 'Azure Cosmos DB (SQL/Core) account: $1'
+        - from: host
+          regex: '(?i)([a-z0-9-]{3,50})\.(?:table|mongo|cassandra|gremlin)\.cosmos\.azure\.com'
+          asset_id: '$1'
+          label: 'Azure Cosmos DB account: $1'
+      host_level_fallback: true
+    indicators:
+      - id: documents-host
+        source: host
+        match: regex
+        pattern: '(?i)\.documents\.azure\.com'
+        weight: 40
+      - id: cosmos-multiapi-host
+        source: host
+        match: regex
+        pattern: '(?i)\.(?:table|mongo|cassandra|gremlin)\.cosmos\.azure\.com'
+        weight: 40
+      - id: x-ms-request-charge-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-request-charge'
+        weight: 35
+      - id: x-ms-gatewayversion-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-gatewayversion'
+        weight: 25
+      - id: x-ms-activity-id-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-activity-id'
+        weight: 20
+      - id: cosmos-auth-error
+        source: body
+        match: regex
+        pattern: '(?i)"code"\s*:\s*"(Unauthorized|BadRequest)"|Required Header authorization is missing'
+        weight: 45
+    knowledge_base:
+      description: 'Azure Cosmos DB is a multi-model database exposed via <account>.documents.azure.com (SQL/Core API) and <account>.<api>.cosmos.azure.com (Table/Mongo/Cassandra/Gremlin). Leaked master keys or resource tokens, over-broad firewall rules, and public network access are the key exposures.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Unauthenticated endpoint fingerprinting'
+          check: 'GET https://{assetId}.documents.azure.com/  (expect 401 with x-ms-gatewayversion / Cosmos error JSON confirming a live account)'
+        - name: 'Leaked master-key / connection-string reuse'
+          check: 'Test any key found in client code / repos against the REST API (authorization header) - passive confirmation only.'
+        - name: 'Network ACL / public-access assessment'
+          check: 'Determine whether the account answers from arbitrary source IPs (public network access enabled).'
+        - name: 'Account name brute-force via DNS'
+          wordlist: 'azure-cosmos-accounts.txt'
+      verification_steps:
+        - 'GET https://{assetId}.documents.azure.com/ and confirm a 401 with a Cosmos JSON error body and x-ms-gatewayversion header.'
+        - 'Check response headers for x-ms-request-charge and x-ms-activity-id which are distinctive to Cosmos DB.'
+        - 'Review client-side JS / mobile bundles and public repos for leaked AccountKey / connection strings.'
+        - 'Assess whether the endpoint is reachable from unexpected networks (public access vs. private endpoint / IP firewall).'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.documents.azure.com/'
+        headers: []
+      wordlists:
+        - 'azure-cosmos-accounts.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/rest/api/cosmos-db/'
+        - 'https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-configure-firewall'
+        - 'https://learn.microsoft.com/en-us/rest/api/cosmos-db/http-status-codes-for-cosmosdb'
+
+  # =========================================================================
+  - id: azure-storage-queue
+    name: 'Azure Storage Queue'
+    category: messaging
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9]{3,24})\.queue\.core\.windows\.net'
+          asset_id: '$1'
+          label: 'Azure Storage Queue account: $1'
+        - from: url
+          regex: '(?i)://[a-z0-9]{3,24}\.queue\.core\.windows\.net/([a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9]))'
+          asset_id: '$1'
+          label: 'Azure Storage Queue: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-suffix
+        source: host
+        match: regex
+        pattern: '(?i)\.queue\.core\.windows\.net'
+        weight: 40
+      - id: server-header
+        source: header
+        match: contains
+        pattern: 'Windows-Azure-Queue'
+        weight: 35
+      - id: x-ms-version-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-version'
+        weight: 20
+      - id: x-ms-request-id-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-request-id'
+        weight: 15
+      - id: queue-error-code
+        source: body
+        match: regex
+        pattern: '(?i)<Code>(QueueNotFound|QueueBeingDeleted|QueueAlreadyExists|InvalidQueueName|AuthenticationFailed|ResourceNotFound)</Code>'
+        weight: 45
+    knowledge_base:
+      description: 'Azure Storage Queue provides message queuing on <account>.queue.core.windows.net. Anonymous access is not normally permitted, but leaked account keys or over-scoped SAS tokens can allow message read/peek/write, and account/queue names are enumerable.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Queue enumeration'
+          check: 'GET https://{assetId}.queue.core.windows.net/?comp=list  (lists queues when a valid key/SAS is supplied)'
+        - name: 'SAS / account-key reuse'
+          check: 'Replay any SAS token or account key found in client code against the queue REST API - read/peek only.'
+        - name: 'Message peek without dequeue'
+          check: 'GET https://{assetId}.queue.core.windows.net/<queue>/messages?peekonly=true  (non-destructive read)'
+        - name: 'Account name brute-force via DNS'
+          wordlist: 'azure-storage-accounts.txt'
+      verification_steps:
+        - 'Request https://{assetId}.queue.core.windows.net/?comp=list and inspect for an AuthenticationFailed error vs. a listing.'
+        - 'Confirm the Server header contains Windows-Azure-Queue and record the x-ms-version.'
+        - 'If a SAS/key is available, use peekonly=true to read messages without removing them from the queue.'
+        - 'Check discovered SAS tokens for over-broad permissions (rwdlacup) and long expiry.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.queue.core.windows.net/?comp=list'
+        headers:
+          - 'x-ms-version: 2021-08-06'
+      wordlists:
+        - 'azure-storage-accounts.txt'
+        - 'azure-queue-names.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/list-queues1'
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/peek-messages'
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/status-and-error-codes2'
+
+  # =========================================================================
+  - id: azure-files
+    name: 'Azure Files'
+    category: object-storage
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9]{3,24})\.file\.core\.windows\.net'
+          asset_id: '$1'
+          label: 'Azure Files storage account: $1'
+        - from: url
+          regex: '(?i)://[a-z0-9]{3,24}\.file\.core\.windows\.net/([a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9]))'
+          asset_id: '$1'
+          label: 'Azure Files share: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-suffix
+        source: host
+        match: regex
+        pattern: '(?i)\.file\.core\.windows\.net'
+        weight: 40
+      - id: server-header
+        source: header
+        match: contains
+        pattern: 'Windows-Azure-File'
+        weight: 35
+      - id: x-ms-version-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-version'
+        weight: 20
+      - id: x-ms-request-id-present
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-request-id'
+        weight: 15
+      - id: files-error-code
+        source: body
+        match: regex
+        pattern: '(?i)<Code>(ShareNotFound|ParentNotFound|ResourceNotFound|ShareAlreadyExists|AuthenticationFailed|SharingViolation)</Code>'
+        weight: 45
+    knowledge_base:
+      description: 'Azure Files exposes SMB/NFS file shares over HTTPS at <account>.file.core.windows.net. The REST/FileREST surface requires a key or SAS, so leaked account keys or over-scoped share SAS tokens are the main risk, enabling directory listing and file download.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Share enumeration'
+          check: 'GET https://{assetId}.file.core.windows.net/?comp=list  (lists shares when authorized)'
+        - name: 'Directory / file listing on a share'
+          check: 'GET https://{assetId}.file.core.windows.net/<share>?restype=directory&comp=list'
+        - name: 'SAS / account-key reuse'
+          check: 'Replay a leaked share SAS or account key against the File REST API - read/list only.'
+        - name: 'Account name brute-force via DNS'
+          wordlist: 'azure-storage-accounts.txt'
+      verification_steps:
+        - 'Request https://{assetId}.file.core.windows.net/?comp=list and inspect for AuthenticationFailed vs. a shares listing.'
+        - 'Confirm the Server header contains Windows-Azure-File and record x-ms-version.'
+        - 'With a valid SAS/key, list directories (restype=directory&comp=list) and identify sensitive files before any download.'
+        - 'Review discovered SAS tokens for permission scope (rwdlc) and expiry window.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.file.core.windows.net/?comp=list'
+        headers:
+          - 'x-ms-version: 2021-08-06'
+      wordlists:
+        - 'azure-storage-accounts.txt'
+        - 'azure-file-shares.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/list-shares'
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/list-directories-and-files'
+        - 'https://learn.microsoft.com/en-us/rest/api/storageservices/status-and-error-codes2'
+
+  # =========================================================================
+  - id: azure-key-vault
+    name: 'Azure Key Vault'
+    category: secrets
+    severity: low
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 125
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)([a-z0-9][a-z0-9-]{1,22}[a-z0-9])\.vault\.azure\.net'
+          asset_id: '$1'
+          label: 'Azure Key Vault: $1'
+        - from: host
+          regex: '(?i)([a-z0-9][a-z0-9-]{1,22}[a-z0-9])\.managedhsm\.azure\.net'
+          asset_id: '$1'
+          label: 'Azure Managed HSM: $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-suffix
+        source: host
+        match: regex
+        pattern: '(?i)\.(vault|managedhsm)\.azure\.net'
+        weight: 40
+      - id: x-ms-keyvault-region-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-keyvault-region'
+        weight: 30
+      - id: x-ms-keyvault-service-version-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-keyvault-service-version'
+        weight: 25
+      - id: x-ms-keyvault-network-info-header
+        source: header-name
+        match: iequals
+        pattern: 'x-ms-keyvault-network-info'
+        weight: 20
+      - id: www-authenticate-vault
+        source: header
+        match: contains
+        pattern: 'resource="https://vault.azure.net'
+        weight: 35
+      - id: keyvault-auth-error
+        source: body
+        match: regex
+        pattern: '(?i)"code"\s*:\s*"Unauthorized".*(credentials|token|authentication)'
+        weight: 40
+    knowledge_base:
+      description: 'Azure Key Vault stores secrets, keys and certificates behind <vault>.vault.azure.net (and Managed HSM at <name>.managedhsm.azure.net). Anonymous data-plane access is denied, so the exposure comes from vaults reachable from the public internet plus leaked service-principal / managed-identity tokens or over-broad access policies.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Unauthenticated fingerprinting'
+          check: 'GET https://{assetId}.vault.azure.net/secrets?api-version=7.4  (expect 401 with a WWW-Authenticate Bearer challenge confirming a live vault)'
+        - name: 'Public network access assessment'
+          check: 'Determine whether the vault answers from arbitrary IPs (public access vs. private endpoint / firewall).'
+        - name: 'Leaked AAD token / SP credential reuse'
+          check: 'Test any bearer token or service-principal secret found in code against the data plane - list operations only.'
+        - name: 'Vault name brute-force via DNS'
+          wordlist: 'azure-keyvault-names.txt'
+      verification_steps:
+        - 'GET https://{assetId}.vault.azure.net/secrets?api-version=7.4 and confirm a 401 with WWW-Authenticate: Bearer resource="https://vault.azure.net".'
+        - 'Inspect response headers for x-ms-keyvault-region and x-ms-keyvault-service-version which are distinctive to Key Vault.'
+        - 'Check whether the vault is reachable at all from the test network (public access enabled vs. restricted).'
+        - 'Search client code, pipelines and repos for leaked bearer tokens / service-principal secrets granting data-plane access.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}.vault.azure.net/secrets?api-version=7.4'
+        headers: []
+      wordlists:
+        - 'azure-keyvault-names.txt'
+      references:
+        - 'https://learn.microsoft.com/en-us/rest/api/keyvault/'
+        - 'https://learn.microsoft.com/en-us/azure/key-vault/general/network-security'
+        - 'https://learn.microsoft.com/en-us/azure/key-vault/general/authentication'

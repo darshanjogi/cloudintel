@@ -1,0 +1,123 @@
+provider: Akamai
+services:
+  - id: akamai-cdn
+    name: 'Akamai CDN'
+    category: cdn
+    severity: information
+    report_threshold: 60
+    bands:
+      medium: 60
+      high: 95
+      very_high: 130
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9.-]+\.(?:akamaiedge|akamai|akamaihd|edgekey|edgesuite|akamaized)\.net)$'
+          asset_id: '$1'
+          label: 'Akamai edge hostname $1'
+        - from: host
+          regex: '(?i)^([a-z0-9.-]+\.akamaitechnologies\.com)$'
+          asset_id: '$1'
+          label: 'Akamai edge hostname $1'
+        - from: header:x-cache
+          regex: '(?i)from\s+([a-z0-9-]+\.[a-z0-9.-]*akamaitechnologies\.com)'
+          asset_id: '$1'
+          label: 'Akamai edge node $1'
+      host_level_fallback: true
+    indicators:
+      - id: edge-host-net
+        source: host
+        match: regex
+        pattern: '(?i)\.(?:akamaiedge|akamai|akamaihd|edgekey|edgesuite|akamaized)\.net$'
+        weight: 40
+      - id: edge-host-com
+        source: host
+        match: regex
+        pattern: '(?i)\.akamaitechnologies\.com$'
+        weight: 40
+      - id: server-akamaighost
+        source: header
+        match: regex
+        pattern: '(?i)^server:\s*akamaighost'
+        weight: 40
+      - id: server-netstorage
+        source: header
+        match: regex
+        pattern: '(?i)^server:\s*akamainetstorage'
+        weight: 40
+      - id: header-x-akamai-transformed
+        source: header-name
+        match: iequals
+        pattern: 'x-akamai-transformed'
+        weight: 25
+      - id: header-x-akamai-staging
+        source: header-name
+        match: iequals
+        pattern: 'x-akamai-staging'
+        weight: 20
+      - id: header-x-akamai-session-info
+        source: header-name
+        match: iequals
+        pattern: 'x-akamai-session-info'
+        weight: 20
+      - id: header-x-check-cacheable
+        source: header-name
+        match: iequals
+        pattern: 'x-check-cacheable'
+        weight: 20
+      - id: x-cache-akamai-node
+        source: header
+        match: regex
+        pattern: '(?i)^x-cache:.*akamai'
+        weight: 25
+      - id: error-reference-body
+        source: body
+        match: regex
+        pattern: '(?i)reference\s*#\d+\.[0-9a-f]{4,}'
+        weight: 25
+    deny:
+      hosts:
+        - '*.cloudfront.net'
+        - '*.fastly.net'
+        - '*.azureedge.net'
+        - '*.b-cdn.net'
+    knowledge_base:
+      description: 'Akamai is the largest global CDN and edge delivery platform. Sites front their origin with an Akamai edge hostname (CNAME to *.edgekey.net / *.edgesuite.net / *.akamaiedge.net / *.akamaized.net). The edge (Server: AkamaiGHost) terminates TLS, caches responses, and can run WAF (Kona/App & API Protector) and EdgeWorkers. NetStorage (Server: AkamaiNetStorage, *.akamaihd.net) is Akamai origin object storage. As attack surface, the CDN edge is interesting for origin-IP exposure, web cache poisoning / cache deception, staging-network config leaks, and Akamai debug (Pragma) headers that disclose cache keys and origin internals.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - name: 'Akamai Pragma debug headers disclose cache key, cacheability and edge internals'
+          check: 'GET {assetId} with header "Pragma: akamai-x-cache-on, akamai-x-get-cache-key, akamai-x-check-cacheable, akamai-x-get-true-cache-key, akamai-x-serial-no" and inspect X-Cache-Key / X-Check-Cacheable / X-Serial / X-True-Cache-Key in the response'
+        - name: 'Origin IP exposure behind the CDN'
+          check: 'Compare the TLS certificate, favicon hash and body of {assetId} against candidate origin IPs from passive DNS / certificate transparency / Censys to reach the origin directly and bypass the Akamai edge and WAF'
+        - name: 'Akamai staging-network reachability'
+          check: 'Resolve the edge hostname on the staging zone (edgekey-staging.net / akamaized-staging.net) and send Host: {assetId} to test whether pre-production configuration is exposed'
+        - name: 'Web cache poisoning via unkeyed input'
+          check: 'Send {assetId} with X-Forwarded-Host / X-Forwarded-Scheme / X-Host / X-Original-URL and check whether the reflected value is cached (look for X-Cache: TCP_HIT on the next request)'
+          wordlist: 'cache-poisoning-headers.txt'
+        - name: 'Web cache deception'
+          check: 'Request {assetId}/account/settings/nonexistent.css while authenticated and check whether the sensitive page is cached and served to anonymous users'
+        - name: 'NetStorage / object enumeration on akamaihd.net origins'
+          wordlist: 'akamai-netstorage-paths.txt'
+      verification_steps:
+        - 'Confirm the Server response header equals AkamaiGHost (edge) or AkamaiNetStorage (NetStorage).'
+        - 'Resolve the host and confirm the CNAME chain terminates in an Akamai zone (edgekey.net / edgesuite.net / akamaiedge.net / akamaized.net / akamaihd.net).'
+        - 'Send the Akamai Pragma debug headers and confirm X-Cache-Key / X-Check-Cacheable / X-Serial appear in the response.'
+        - 'Trigger a blocked/denied request and confirm an Akamai error body containing "Reference #<n>.<hex>", which identifies the Akamai edge/WAF stack.'
+        - 'Diff production vs staging (edgekey-staging.net) responses to spot pre-production configuration exposure.'
+      repeater_template:
+        method: GET
+        url: 'https://{assetId}/'
+        headers:
+          - 'Pragma: akamai-x-cache-on, akamai-x-cache-remote-on, akamai-x-check-cacheable, akamai-x-get-cache-key, akamai-x-get-extracted-values, akamai-x-get-nonces, akamai-x-get-ssl-client-session-id, akamai-x-get-true-cache-key, akamai-x-serial-no'
+          - 'Accept: */*'
+      wordlists:
+        - 'cache-poisoning-headers.txt'
+        - 'akamai-netstorage-paths.txt'
+        - 'origin-discovery-hosts.txt'
+      references:
+        - 'https://techdocs.akamai.com/property-mgr/docs/know-caching'
+        - 'https://community.akamai.com/customers/s/article/Using-Akamai-Pragma-headers-to-investigate-or-troubleshoot-Akamai-content-delivery'
+        - 'https://portswigger.net/research/practical-web-cache-poisoning'
+        - 'https://portswigger.net/web-security/web-cache-deception'
+        - 'https://owasp.org/www-community/attacks/Cache_Poisoning'

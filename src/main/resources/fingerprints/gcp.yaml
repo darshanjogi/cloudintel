@@ -1,0 +1,433 @@
+provider: Google Cloud
+services:
+  - id: gcp-cloud-storage
+    name: 'Google Cloud Storage'
+    category: object-storage
+    severity: medium
+    report_threshold: 70
+    bands: { medium: 70, high: 110, very_high: 150 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])\.storage\.googleapis\.com$'
+          asset_id: '$1'
+          label: 'GCS bucket $1 (virtual-hosted)'
+        - from: url
+          regex: '(?i)https?://storage\.googleapis\.com/([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])'
+          asset_id: '$1'
+          label: 'GCS bucket $1 (path-style)'
+        - from: url
+          regex: '(?i)https?://storage\.cloud\.google\.com/([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])'
+          asset_id: '$1'
+          label: 'GCS bucket $1 (console link)'
+      host_level_fallback: true
+    indicators:
+      - id: host-gcs
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)storage\.googleapis\.com$'
+        weight: 40
+      - id: header-goog-generation
+        source: header-name
+        match: iequals
+        pattern: 'x-goog-generation'
+        weight: 25
+      - id: header-guploader-uploadid
+        source: header-name
+        match: iequals
+        pattern: 'x-guploader-uploadid'
+        weight: 25
+      - id: header-goog-storage-class
+        source: header-name
+        match: iequals
+        pattern: 'x-goog-storage-class'
+        weight: 20
+      - id: server-uploadserver
+        source: header
+        match: regex
+        pattern: '(?i)uploadserver'
+        weight: 20
+      - id: xml-nosuchbucket
+        source: xml
+        match: contains
+        pattern: 'NoSuchBucket'
+        weight: 55
+      - id: xml-accessdenied
+        source: xml
+        match: contains
+        pattern: 'AccessDenied'
+        weight: 40
+    deny:
+      hosts: ['*.firebasestorage.googleapis.com', 'firebasestorage.googleapis.com']
+    knowledge_base:
+      description: 'Google Cloud Storage bucket exposed via the XML/JSON API on storage.googleapis.com. Misconfigured buckets can allow anonymous object listing, object download, or exposure of the bucket IAM policy.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Anonymous object listing (XML API)', check: 'GET https://storage.googleapis.com/{assetId} and inspect for a <ListBucketResult> body versus <Error><Code>AccessDenied</Code>' }
+        - { name: 'Bucket IAM policy read via allUsers', check: 'GET https://storage.googleapis.com/storage/v1/b/{assetId}/iam returning 200 indicates the policy is world-readable' }
+        - { name: 'Object name brute-force', wordlist: 'gcs-common-objects.txt' }
+      verification_steps:
+        - 'Request https://storage.googleapis.com/{assetId} and confirm x-goog-* headers or a GCS XML error body are present.'
+        - 'Compare virtual-hosted (https://{assetId}.storage.googleapis.com/) and path-style responses to confirm the same bucket.'
+        - 'Check whether AccessDenied vs NoSuchBucket is returned to determine if the bucket exists but is private.'
+      repeater_template: { method: GET, url: 'https://storage.googleapis.com/{assetId}?max-keys=20', headers: ['Accept: application/xml'] }
+      wordlists: ['gcs-common-objects.txt', 'cloud-buckets.txt']
+      references: ['https://cloud.google.com/storage/docs/xml-api/reference-status', 'https://cloud.google.com/storage/docs/access-control/making-data-public']
+
+  - id: gcp-cloud-functions
+    name: 'Google Cloud Functions'
+    category: serverless
+    severity: medium
+    report_threshold: 65
+    bands: { medium: 65, high: 95, very_high: 125 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z]+[0-9]?-[a-z0-9-]+)\.cloudfunctions\.net$'
+          asset_id: '$1'
+          label: 'Cloud Functions endpoint $1'
+        - from: url
+          regex: '(?i)cloudfunctions\.net/([a-zA-Z0-9_-]+)'
+          asset_id: '$1'
+          label: 'Cloud Function $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-cloudfunctions
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)cloudfunctions\.net$'
+        weight: 40
+      - id: header-function-execution-id
+        source: header-name
+        match: iequals
+        pattern: 'function-execution-id'
+        weight: 30
+      - id: header-cloud-trace-context
+        source: header-name
+        match: iequals
+        pattern: 'x-cloud-trace-context'
+        weight: 20
+      - id: server-google-frontend
+        source: header
+        match: regex
+        pattern: '(?i)google frontend'
+        weight: 15
+      - id: body-could-not-handle
+        source: body
+        match: contains
+        pattern: 'Error: could not handle the request'
+        weight: 40
+    knowledge_base:
+      description: 'Google Cloud Functions (1st gen) HTTP-triggered endpoint on <region>-<project>.cloudfunctions.net. Unauthenticated invocation may be permitted when the function grants the allUsers principal the Cloud Functions Invoker role.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Unauthenticated invocation', check: 'GET https://{assetId}.cloudfunctions.net/ and observe 200/OK versus a 403 Forbidden that indicates IAM is enforced' }
+        - { name: 'HTTP method / verb tampering', check: 'Replay the request to https://{assetId}.cloudfunctions.net/ with POST, PUT and OPTIONS to map accepted methods' }
+        - { name: 'Function name enumeration', wordlist: 'gcp-function-names.txt' }
+      verification_steps:
+        - 'Confirm the function-execution-id and x-cloud-trace-context response headers are present.'
+        - 'Trigger an error path and look for the "Error: could not handle the request" body served on a crash/timeout.'
+        - 'Diff authenticated vs anonymous requests to determine if the Invoker role is bound to allUsers.'
+      repeater_template: { method: GET, url: 'https://{assetId}.cloudfunctions.net/', headers: [] }
+      wordlists: ['gcp-function-names.txt']
+      references: ['https://cloud.google.com/functions/docs/securing/managing-access-iam']
+
+  - id: gcp-firebase
+    name: 'Google Firebase'
+    category: platform
+    severity: high
+    report_threshold: 60
+    bands: { medium: 60, high: 90, very_high: 125 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.firebaseio\.com$'
+          asset_id: '$1'
+          label: 'Firebase Realtime Database $1'
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.firebaseapp\.com$'
+          asset_id: '$1'
+          label: 'Firebase Hosting project $1'
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.web\.app$'
+          asset_id: '$1'
+          label: 'Firebase Hosting site $1'
+      host_level_fallback: true
+    indicators:
+      - id: host-firebaseio
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)firebaseio\.com$'
+        weight: 40
+      - id: host-firebasestorage
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)firebasestorage\.googleapis\.com$'
+        weight: 40
+      - id: host-firebaseapp
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)firebaseapp\.com$'
+        weight: 35
+      - id: host-firestore
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)firestore\.googleapis\.com$'
+        weight: 35
+      - id: host-webapp
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)web\.app$'
+        weight: 35
+      - id: body-permission-denied
+        source: body
+        match: regex
+        pattern: '(?i)"error"\s*:\s*"permission denied"'
+        weight: 50
+      - id: url-reserved-namespace
+        source: url
+        match: contains
+        pattern: '/__/firebase/'
+        weight: 30
+      - id: header-goog-generation
+        source: header-name
+        match: iequals
+        pattern: 'x-goog-generation'
+        weight: 25
+      - id: header-guploader-uploadid
+        source: header-name
+        match: iequals
+        pattern: 'x-guploader-uploadid'
+        weight: 20
+    knowledge_base:
+      description: 'Google Firebase surface: Realtime Database (firebaseio.com), Firestore, Firebase Hosting (firebaseapp.com / web.app), and Firebase Storage (firebasestorage.googleapis.com). Permissive security rules can expose data to anonymous readers or writers.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Realtime Database open-read test', check: 'GET https://{assetId}.firebaseio.com/.json and check for a JSON payload versus {"error":"Permission denied"}' }
+        - { name: 'Realtime Database rule disclosure', check: 'GET https://{assetId}.firebaseio.com/.settings/rules.json to see if security rules are world-readable' }
+        - { name: 'Hosting config disclosure', check: 'GET https://{assetId}.web.app/__/firebase/init.js to recover the client Firebase config (apiKey, projectId, databaseURL)' }
+      verification_steps:
+        - 'Append .json to a Realtime Database path and confirm data returns instead of {"error":"Permission denied"}.'
+        - 'Fetch /__/firebase/init.js on a Hosting host and extract the projectId / databaseURL for pivoting.'
+        - 'For Firebase Storage, confirm x-goog-* response headers to verify the GCS-backed bucket.'
+      repeater_template: { method: GET, url: 'https://{assetId}.firebaseio.com/.json', headers: ['Accept: application/json'] }
+      wordlists: ['firebase-db-paths.txt', 'firebase-projects.txt']
+      references: ['https://firebase.google.com/docs/database/security', 'https://firebase.google.com/docs/rules/basics']
+
+  - id: gcp-app-engine
+    name: 'Google App Engine'
+    category: platform
+    severity: low
+    report_threshold: 60
+    bands: { medium: 60, high: 85, very_high: 110 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.appspot\.com$'
+          asset_id: '$1'
+          label: 'App Engine app $1'
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.[a-z0-9]+\.r\.appspot\.com$'
+          asset_id: '$1'
+          label: 'App Engine app $1 (regionalized)'
+      host_level_fallback: true
+    indicators:
+      - id: host-appspot
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)appspot\.com$'
+        weight: 40
+      - id: header-cloud-trace-context
+        source: header-name
+        match: iequals
+        pattern: 'x-cloud-trace-context'
+        weight: 25
+      - id: server-google-frontend
+        source: header
+        match: regex
+        pattern: '(?i)google frontend'
+        weight: 20
+      - id: body-not-found
+        source: body
+        match: contains
+        pattern: 'The requested URL was not found on this server'
+        weight: 20
+    knowledge_base:
+      description: 'Google App Engine application served on appspot.com through the Google Frontend. Non-default services are reachable as <service>-dot-<project>.appspot.com and may expose staging or admin surfaces.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Service / version enumeration', check: 'Request https://<service>-dot-{assetId}.appspot.com/ across candidate service names to map deployed services' }
+        - { name: 'Default handler probing', wordlist: 'appengine-paths.txt' }
+      verification_steps:
+        - 'Confirm the x-cloud-trace-context header and a Google Frontend Server header on responses.'
+        - 'Request a non-existent path and confirm the Google Frontend "requested URL was not found" 404 body.'
+        - 'Enumerate <service>-dot-{assetId}.appspot.com to discover non-default services.'
+      repeater_template: { method: GET, url: 'https://{assetId}.appspot.com/', headers: [] }
+      wordlists: ['appengine-paths.txt', 'gcp-service-names.txt']
+      references: ['https://cloud.google.com/appengine/docs/standard/how-requests-are-routed']
+
+  - id: gcp-cloud-run
+    name: 'Google Cloud Run'
+    category: serverless
+    severity: medium
+    report_threshold: 60
+    bands: { medium: 60, high: 85, very_high: 110 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)-[a-z0-9]+-[a-z]{2}\.a\.run\.app$'
+          asset_id: '$1'
+          label: 'Cloud Run service $1 (classic URL)'
+        - from: host
+          regex: '(?i)^([a-z0-9-]+)\.[a-z0-9-]+\.run\.app$'
+          asset_id: '$1'
+          label: 'Cloud Run service $1 (regional URL)'
+      host_level_fallback: true
+    indicators:
+      - id: host-run-app
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)run\.app$'
+        weight: 40
+      - id: header-cloud-trace-context
+        source: header-name
+        match: iequals
+        pattern: 'x-cloud-trace-context'
+        weight: 25
+      - id: server-google-frontend
+        source: header
+        match: regex
+        pattern: '(?i)google frontend'
+        weight: 20
+      - id: body-not-found
+        source: body
+        match: contains
+        pattern: 'The requested URL was not found on this server'
+        weight: 20
+    knowledge_base:
+      description: 'Google Cloud Run service exposed on run.app behind the Google Frontend. Services deployed with the allUsers Invoker binding are reachable without authentication and may expose an internal container application.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Unauthenticated access check', check: 'GET https://{assetId}.<region>.run.app/ and observe 200 versus a 403 with a Google-issued forbidden page indicating IAM enforcement' }
+        - { name: 'Container app fingerprinting', check: 'Probe {assetId} for framework routes and error pages that leak through the Google Frontend' }
+        - { name: 'Path / endpoint discovery', wordlist: 'cloud-run-paths.txt' }
+      verification_steps:
+        - 'Confirm the x-cloud-trace-context header and a Google Frontend Server header.'
+        - 'Compare anonymous vs authenticated requests to determine whether allUsers holds the run.invoker role.'
+        - 'Distinguish a Cloud Run 404 (container) from the Google Frontend 404 to confirm the service is live.'
+      repeater_template: { method: GET, url: 'https://{assetId}.run.app/', headers: [] }
+      wordlists: ['cloud-run-paths.txt']
+      references: ['https://cloud.google.com/run/docs/authenticating/public']
+
+  - id: gcp-bigquery
+    name: 'Google BigQuery'
+    category: analytics
+    severity: medium
+    report_threshold: 60
+    bands: { medium: 60, high: 90, very_high: 120 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: url
+          regex: '(?i)bigquery\.googleapis\.com/bigquery/v2/projects/([a-zA-Z0-9_-]+)'
+          asset_id: '$1'
+          label: 'BigQuery project $1'
+        - from: body
+          regex: '(?i)"projectId"\s*:\s*"([a-zA-Z0-9_-]+)"'
+          asset_id: '$1'
+          label: 'BigQuery project $1 (from body)'
+      host_level_fallback: true
+    indicators:
+      - id: host-bigquery
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)bigquery\.googleapis\.com$'
+        weight: 40
+      - id: body-kind-bigquery
+        source: body
+        match: regex
+        pattern: '(?i)"kind"\s*:\s*"bigquery#'
+        weight: 45
+      - id: body-error-reason
+        source: body
+        match: regex
+        pattern: '(?i)"reason"\s*:\s*"(authError|accessDenied|notFound)"'
+        weight: 25
+      - id: server-esf
+        source: header
+        match: regex
+        pattern: '(?i)(^|\s)esf(\s|$)'
+        weight: 20
+    knowledge_base:
+      description: 'Google BigQuery REST API surface on bigquery.googleapis.com. Leaked project identifiers, dataset names, or over-scoped access tokens can enable dataset/table enumeration and query execution against analytics data.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Dataset enumeration', check: 'GET https://bigquery.googleapis.com/bigquery/v2/projects/{assetId}/datasets and inspect for bigquery#datasetList results' }
+        - { name: 'Access-control mapping', check: 'Test the discovered project {assetId} with and without a bearer token to see if a 401 authError versus 200 is returned' }
+        - { name: 'Table name discovery', wordlist: 'bigquery-datasets.txt' }
+      verification_steps:
+        - 'Confirm responses contain a "kind":"bigquery#..." JSON field and a Server: ESF header.'
+        - 'Call the datasets endpoint for {assetId} and note authError versus accessDenied versus a populated list.'
+        - 'Never run destructive jobs; restrict to GET list/get calls only.'
+      repeater_template: { method: GET, url: 'https://bigquery.googleapis.com/bigquery/v2/projects/{assetId}/datasets', headers: ['Accept: application/json'] }
+      wordlists: ['bigquery-datasets.txt', 'gcp-project-ids.txt']
+      references: ['https://cloud.google.com/bigquery/docs/reference/rest']
+
+  - id: gcp-pubsub
+    name: 'Google Cloud Pub/Sub'
+    category: messaging
+    severity: medium
+    report_threshold: 60
+    bands: { medium: 60, high: 90, very_high: 120 }
+    require_distinct_indicators: 2
+    asset:
+      extractors:
+        - from: url
+          regex: '(?i)pubsub\.googleapis\.com/v1/projects/([a-zA-Z0-9_-]+)'
+          asset_id: '$1'
+          label: 'Pub/Sub project $1'
+        - from: body
+          regex: '(?i)projects/([a-zA-Z0-9_-]+)/(?:topics|subscriptions)/'
+          asset_id: '$1'
+          label: 'Pub/Sub project $1 (from resource name)'
+      host_level_fallback: true
+    indicators:
+      - id: host-pubsub
+        source: host
+        match: regex
+        pattern: '(?i)(^|\.)pubsub\.googleapis\.com$'
+        weight: 40
+      - id: body-resource-name
+        source: body
+        match: regex
+        pattern: '(?i)projects/[a-z0-9_-]+/(?:topics|subscriptions)/[a-z0-9_.~%+-]+'
+        weight: 40
+      - id: body-error-status
+        source: body
+        match: regex
+        pattern: '(?i)"status"\s*:\s*"(PERMISSION_DENIED|NOT_FOUND|UNAUTHENTICATED)"'
+        weight: 25
+      - id: server-esf
+        source: header
+        match: regex
+        pattern: '(?i)(^|\s)esf(\s|$)'
+        weight: 20
+    knowledge_base:
+      description: 'Google Cloud Pub/Sub REST API on pubsub.googleapis.com. Leaked topic or subscription resource names, or IAM bindings that grant publish/subscribe to broad principals, can allow message injection or interception.'
+      why_detected: 'Auto-filled from the specific indicators that fired.'
+      attack_vectors:
+        - { name: 'Topic enumeration', check: 'GET https://pubsub.googleapis.com/v1/projects/{assetId}/topics and inspect the returned topics array' }
+        - { name: 'Subscription enumeration', check: 'GET https://pubsub.googleapis.com/v1/projects/{assetId}/subscriptions to map pull/push subscriptions' }
+        - { name: 'IAM policy read', check: 'GET https://pubsub.googleapis.com/v1/projects/{assetId}/topics/<topic>:getIamPolicy to review bound members' }
+      verification_steps:
+        - 'Confirm resource names of the form projects/{assetId}/topics/... and a Server: ESF header.'
+        - 'Note whether the API returns "status":"PERMISSION_DENIED" (exists, protected) versus "NOT_FOUND".'
+        - 'Do not publish messages; restrict testing to list/get and getIamPolicy calls.'
+      repeater_template: { method: GET, url: 'https://pubsub.googleapis.com/v1/projects/{assetId}/topics', headers: ['Accept: application/json'] }
+      wordlists: ['pubsub-topics.txt', 'gcp-project-ids.txt']
+      references: ['https://cloud.google.com/pubsub/docs/reference/rest']
