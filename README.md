@@ -53,7 +53,7 @@ Add a service without touching Java: [`docs/FINGERPRINT-GUIDE.md`](docs/FINGERPR
 **From source:**
 
 ```bash
-git clone https://github.com/YOUR_USER/cloudintel.git
+git clone https://github.com/darshanjogi/cloudintel.git
 cd cloudintel
 mvn package
 # Loadable JAR: target/cloudintel-1.0.0-all.jar
