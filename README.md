@@ -15,9 +15,7 @@ checklists; every request is fired by the tester.
 <!-- ![Evidence viewer](docs/img/evidence.png) -->
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/darshanjogi/cloudintel/main/dashboard.bmp"
-       alt="CloudIntel Dashboard"
-       width="850">
+  <img src="./dashboard.bmp" alt="CloudIntel Dashboard" width="950">
 </p>
 
 ---
